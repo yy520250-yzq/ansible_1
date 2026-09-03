@@ -1,0 +1,17 @@
+---
+# hc_k8s / render —— 无 kubectl 时降级,有则查模板
+- name: 渲染 k8s 段正文
+  ansible.builtin.set_fact:
+    hc_section_k8s_title: "k8s 专项巡检"
+    hc_section_k8s_body: "{{ (lookup('template', 'body.md.j2')) if hc_k8s_ok else 'ℹ️ 控制机无可用 kubectl/kubeconfig,k8s 专项跳过(需在装有 kubectl 的控制机执行)' }}"
+
+- name: 提取段级严重度
+  ansible.builtin.set_fact:
+    hc_section_k8s_severity: >-
+      {{ 'ok' if not hc_k8s_ok
+         else ('crit' if '<!--SEV:crit-->' in hc_section_k8s_body
+           else ('warn' if '<!--SEV:warn-->' in hc_section_k8s_body else 'ok')) }}
+
+- name: 剥离 SEV 标记(如有)
+  ansible.builtin.set_fact:
+    hc_section_k8s_body: "{{ hc_section_k8s_body | regex_replace('<!--SEV:[a-z]+-->', '') }}"

@@ -48,7 +48,7 @@ hc_profiles:
   service: true     # 服务专项(已实现)
   memory: true     # 内存专项(已实现)
   disk: true       # 磁盘专项(已实现)
-  k8s: false        # k8s 专项
+  k8s: true         # k8s 专项(已实现)
   cloud: false      # 云专项
 
 # ---------- 关键服务清单(服务专项) ----------

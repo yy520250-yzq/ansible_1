@@ -45,6 +45,11 @@
         name: hc_disk
       when: hc_profiles.disk | default(false)
 
+    - name: k8s 专项巡检(需控制机有 kubectl)
+      ansible.builtin.include_role:
+        name: hc_k8s
+      when: hc_profiles.k8s | default(false)
+
     - name: 生成 Markdown / JSON 报告
       ansible.builtin.include_role:
         name: hc_common

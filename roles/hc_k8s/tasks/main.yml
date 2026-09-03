@@ -1,0 +1,23 @@
+---
+# ============================================================
+# hc_k8s 入口 —— 需在装有 kubectl + kubeconfig 的控制机运行
+# 无可用 kubectl 时自动降级为 ℹ️(如 Semaphore 容器内)
+# ============================================================
+- name: 探测 kubectl 可用性
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_timeout: 20
+    hc_var: hc_k8s_probe
+    hc_cmd: |
+      if command -v kubectl >/dev/null 2>&1 && kubectl cluster-info --request-timeout=5s >/dev/null 2>&1; then echo ok; else echo no; fi
+
+- name: 记录 k8s 探测结果
+  ansible.builtin.set_fact:
+    hc_k8s_ok: "{{ hc_k8s_probe.out | default('') | trim == 'ok' }}"
+
+- name: k8s 专项 - 采集
+  ansible.builtin.include_tasks: collect.yml
+  when: hc_k8s_ok
+
+- name: k8s 专项 - 判定与渲染
+  ansible.builtin.include_tasks: render.yml

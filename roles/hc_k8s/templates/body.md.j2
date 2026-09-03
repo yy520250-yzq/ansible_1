@@ -1,0 +1,75 @@
+{# hc_k8s 判定模板(仅当 hc_k8s_ok 时渲染) -#}
+{% set S = {'ok':'✅','warn':'⚠️','crit':'❌','info':'ℹ️'} -%}
+{% set R = {'0':'ok','1':'warn','2':'crit'} -%}
+{% set st = namespace(rk=0) -%}
+
+### 1. 集群节点
+{% set nd = hc_k8s_nodes.out | default([]) -%}
+{% if nd is iterable and nd is not string -%}
+{%   if not nd -%}
+  ℹ️ 未取到节点(权限或集群异常)
+{%   endif -%}
+{%   for n in nd -%}
+{%     if not n.ready or n.pressure -%}{% set st.rk = 2 -%}{% endif -%}
+  {{ S['crit'] if (not n.ready or n.pressure) else S['ok'] }} {{ n.name }} · k8s {{ n.version }} · {{ n.cpu }}核 / {{ n.memGi }}GB{% if n.taints %} · taints: {{ n.taints | join(',') }}{% endif %}{% if n.pressure %} · ❌ 压力: {{ n.pressure | join(',') }}{% endif %}
+{%   endfor %}
+{% endif -%}
+
+### 2. 工作负载异常
+{% set pd = hc_k8s_pods.out | default({}) -%}
+{% if pd is mapping -%}
+{%   set an = pd.anomalies | default([]) -%}
+{%   if an -%}
+{%     set st.rk = [st.rk, 2] | max -%}
+  异常容器:
+{%     for a in an[:12] -%}
+    ❌ {{ a.ns }}/{{ a.name }} —— {{ a.reason }}
+{%     endfor -%}
+{%   else -%}
+  ✅ 无 CrashLoop/ImagePull/OOM 异常
+{%   endif -%}
+{%   if pd.pending -%}{% set st.rk = [st.rk, 1] | max -%}
+  ⚠️ Pending 未调度: {% for p in pd.pending %}{{ p.ns }}/{{ p.name }} {% endfor %}
+{%   endif -%}
+{%   if pd.high_restarts -%}{% set st.rk = [st.rk, 1] | max -%}
+  ⚠️ 重启≥5: {% for p in pd.high_restarts %}{{ p.name }}({{ p.restarts }}) {% endfor %}
+{%   endif -%}
+{% endif -%}
+
+### 3. 发布与存储
+{% set dp = hc_k8s_deploy.out | default({}) -%}
+{% if dp is mapping -%}
+{%   if dp.bad_deploy -%}
+{%     set st.rk = [st.rk, 2] | max -%}
+  副本不足的 Deployment:
+{%     for d in dp.bad_deploy -%}
+    ❌ {{ d.ns }}/{{ d.name }} ready {{ d.ready }}/{{ d.desired }}
+{%     endfor -%}
+{%   else -%}
+  ✅ 所有 Deployment 副本就绪
+{%   endif -%}
+{%   if dp.pvc_stuck -%}
+{%     set st.rk = [st.rk, 1] | max -%}
+  ⚠️ 未绑定 PVC: {% for p in dp.pvc_stuck %}{{ p.name }}({{ p.phase }}) {% endfor %}
+{%   endif -%}
+{% endif -%}
+
+### 4. 系统组件与事件
+{% set sy = hc_k8s_sys.out | default({}) -%}
+{% if sy is mapping -%}
+{%   if sy.unready_system -%}
+{%     set st.rk = 2 -%}
+  ❌ kube-system 未就绪: {{ sy.unready_system | join(', ') }}
+{%   else -%}
+  ✅ 系统组件就绪
+{%   endif -%}
+{%   set wc = sy.warn_count | default(0) -%}
+{%   if wc > 10 -%}{% set st.rk = [st.rk, 1] | max -%}{% endif -%}
+  近期 Warning 事件: {{ wc }} 条{{ ' ⚠️ 偏多' if wc > 10 }}
+{%   if sy.warn_sample -%}
+{%     for m in sy.warn_sample -%}
+    · {{ m }}
+{%     endfor -%}
+{%   endif -%}
+{% endif -%}
+<!--SEV:{{ R[st.rk|string] }}-->

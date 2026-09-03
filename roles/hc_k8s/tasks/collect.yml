@@ -1,0 +1,159 @@
+---
+# ============================================================
+# hc_k8s / collect —— 全部只读 kubectl,失败不中断
+# ============================================================
+# 1. 集群节点: 状态/版本/资源/压力/污点
+- name: 采集节点健康
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_timeout: 30
+    hc_json: true
+    hc_var: hc_k8s_nodes
+    hc_cmd: |
+      python3 - <<'PY'
+      import subprocess, json
+      def kub(args):
+          try:
+              r = subprocess.run(["kubectl"] + args + ["-o", "json"],
+                                 capture_output=True, text=True, timeout=20)
+              return json.loads(r.stdout)
+          except Exception:
+              return {"items": []}
+      data = kub(["get", "nodes"])
+      out = []
+      for n in data.get("items", []):
+          md = n.get("metadata", {}); st = n.get("status", {})
+          conds = {c["type"]: c["status"] for c in st.get("conditions", [])}
+          cap = st.get("capacity", {})
+          mem = cap.get("memory", "0")
+          memGi = round((int(mem.rstrip("Ki").rstrip("k")) // 1048576)) if mem.endswith(("Ki", "k")) else 0
+          taints = [t.get("key") for t in (n.get("spec", {}).get("taints") or [])]
+          press = [k for k in ("MemoryPressure", "DiskPressure", "PIDPressure", "NetworkUnavailable")
+                   if conds.get(k) == "True"]
+          out.append({
+              "name": md.get("name"),
+              "version": (st.get("nodeInfo") or {}).get("kubeletVersion"),
+              "ready": conds.get("Ready") == "True",
+              "cpu": cap.get("cpu"), "memGi": memGi,
+              "taints": taints, "pressure": press})
+      print(json.dumps(out))
+      PY
+
+# 2. 工作负载异常: CrashLoop/Pending/ImagePull/OOM/高重启
+- name: 采集工作负载异常
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_timeout: 40
+    hc_json: true
+    hc_var: hc_k8s_pods
+    hc_cmd: |
+      python3 - <<'PY'
+      import subprocess, json
+      def kub(args):
+          try:
+              r = subprocess.run(["kubectl"] + args + ["-o", "json"],
+                                 capture_output=True, text=True, timeout=25)
+              return json.loads(r.stdout)
+          except Exception:
+              return {"items": []}
+      data = kub(["get", "pods", "-A"])
+      anom, pending, restarts = [], [], []
+      for p in data.get("items", []):
+          md = p.get("metadata", {}); st = p.get("status", {})
+          ns, name = md.get("namespace"), md.get("name")
+          phase = st.get("phase", "")
+          csts = st.get("containerStatuses") or []
+          r = sum(c.get("restartCount", 0) for c in csts)
+          if r >= 5: restarts.append({"ns": ns, "name": name, "restarts": r})
+          for c in csts:
+              s = c.get("state", {})
+              for mode in ("waiting", "terminated"):
+                  rr = s.get(mode, {}).get("reason") if mode in s else None
+                  if rr in ("CrashLoopBackOff", "ImagePullBackOff", "ErrImagePull",
+                            "CreateContainerError", "RunContainerError", "OOMKilled"):
+                      anom.append({"ns": ns, "name": name, "reason": rr})
+          if phase == "Pending" and not csts:
+              pending.append({"ns": ns, "name": name})
+          if phase == "Pending" and csts and not any((c or {}).get("ready") for c in csts):
+              pending.append({"ns": ns, "name": name})
+      # 去重
+      seen = set()
+      anom = [a for a in anom if not (a["ns"], a["name"], a["reason"]) in seen and not seen.add((a["ns"], a["name"], a["reason"]))]
+      print(json.dumps({"anomalies": anom[:20], "pending": pending[:10], "high_restarts": restarts[:10]}))
+      PY
+
+# 3. 发布健康: ready < desired 的 Deployment + 未绑定 PVC
+- name: 采集发布与存储健康
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_timeout: 30
+    hc_json: true
+    hc_var: hc_k8s_deploy
+    hc_cmd: |
+      python3 - <<'PY'
+      import subprocess, json
+      def kub(args):
+          try:
+              r = subprocess.run(["kubectl"] + args + ["-o", "json"],
+                                 capture_output=True, text=True, timeout=20)
+              return json.loads(r.stdout)
+          except Exception:
+              return {"items": []}
+      bad = []
+      for d in kub(["get", "deployments", "-A"]).get("items", []):
+          md = d.get("metadata", {}); sp = d.get("spec", {}); st = d.get("status", {})
+          des = sp.get("replicas", 0); ready = st.get("readyReplicas", 0)
+          if des and ready < des:
+              bad.append({"ns": md.get("namespace"), "name": md.get("name"),
+                          "desired": des, "ready": ready})
+      stuck = []
+      for pv in kub(["get", "pvc", "-A"]).get("items", []):
+          md = pv.get("metadata", {})
+          if (pv.get("status", {}).get("phase") or "") not in ("Bound",):
+              stuck.append({"ns": md.get("namespace"), "name": md.get("name"),
+                            "phase": pv.get("status", {}).get("phase")})
+      print(json.dumps({"bad_deploy": bad, "pvc_stuck": stuck[:10]}))
+      PY
+
+# 4. 系统组件 + 近期 Warning 事件
+- name: 采集系统组件与事件
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_timeout: 30
+    hc_json: true
+    hc_var: hc_k8s_sys
+    hc_cmd: |
+      python3 - <<'PY'
+      import subprocess, json
+      def kub(args):
+          try:
+              r = subprocess.run(["kubectl"] + args + ["-o", "json"],
+                                 capture_output=True, text=True, timeout=20)
+              return json.loads(r.stdout)
+          except Exception:
+              return {"items": []}
+      unready = []
+      for d in kub(["get", "deployments", "-A"]).get("items", []):
+          md = d.get("metadata", {})
+          if md.get("namespace") == "kube-system":
+              st = d.get("status", {})
+              if (d.get("spec", {}).get("replicas", 0) or 0) > 0 and st.get("readyReplicas", 0) < d.get("spec", {}).get("replicas", 0):
+                  unready.append("deploy/" + md.get("name"))
+      for d in kub(["get", "daemonsets", "-A"]).get("items", []):
+          md = d.get("metadata", {})
+          if md.get("namespace") == "kube-system":
+              st = d.get("status", {})
+              if (st.get("desiredNumberScheduled", 0) or 0) > 0 and (st.get("numberReady", 0) or 0) < st.get("desiredNumberScheduled", 0):
+                  unready.append("ds/" + md.get("name"))
+      ev = kub(["get", "events", "-A", "--field-selector", "type=Warning"])
+      warns = ev.get("items", [])
+      sample, seen = [], set()
+      for e in sorted(warns, key=lambda x: x.get("lastTimestamp", ""), reverse=True):
+          m = e.get("message", "")
+          if len(sample) >= 5: break
+          key = (e.get("involvedObject", {}).get("kind"), e.get("involvedObject", {}).get("name"))
+          if key in seen: continue
+          seen.add(key)
+          sample.append((m or "")[:120])
+      print(json.dumps({"unready_system": unready, "warn_count": len(warns), "warn_sample": sample}))
+      PY
