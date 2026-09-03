@@ -1,0 +1,80 @@
+{# ============================================================
+   hc_service 判定模板
+   ============================================================ -#}
+{% set th = hc_thresholds | default({}) -%}
+{% set S = {'ok':'✅','warn':'⚠️','crit':'❌','info':'ℹ️'} -%}
+{% set R = {'0':'ok','1':'warn','2':'crit'} -%}
+{% set st = namespace(rk=0) -%}
+{% set rootok = hc_root_ok | default(false) -%}
+{% set crit_svcs = hc_critical_services | default([]) -%}
+
+### 1. 关键服务存活检查
+{% if crit_svcs -%}
+{%   for s in crit_svcs -%}
+{%     set stt = hc_svc_critical.out | default('') -%}
+{%     set line = stt.splitlines() | select('search', '^' ~ s ~ '\\|') | first | default('') -%}
+{%     if line -%}
+{%       set parts = line.split('|') -%}
+{%       set act = parts[1] | default('?') -%}
+{%       set en = parts[2] | default('?') -%}
+{%       if act != 'active' -%}{% set st.rk = 2 -%}
+{%       elif en != 'enabled' -%}{% set st.rk = [st.rk, 1] | max -%}
+{%       endif -%}
+  {{ S['ok'] if act == 'active' else S['crit'] }} {{ s }} —— 状态: {{ act }} · 自启: {{ en }}
+{%     else -%}
+  {{ S['info'] }} {{ s }} —— 未查询到(unit 不存在?)
+{%     endif -%}
+{%   endfor -%}
+{% else -%}
+  ℹ️ 未配置要盯的关键服务(在 group_vars/all.yml 的 hc_critical_services 填写)
+{% endif -%}
+
+### 2. 使能却未运行(潜在失联服务)
+{% set dd = hc_svc_dead.out | default({'enabled_not_running': []}) -%}
+{% if dd is mapping and dd.enabled_not_running -%}
+{%   set st.rk = [st.rk, 1] | max -%}
+  ⚠️ enabled 但当前未运行的服务:
+{%   for u in dd.enabled_not_running -%}
+    · {{ u }}
+{%   endfor -%}
+{% elif dd is mapping -%}
+  ✅ 所有 enabled 服务均在运行
+{% endif -%}
+
+### 3. 服务运行统计与 failed
+{% set sv = hc_svc_stat.out | default('') -%}
+{% if sv -%}
+{%   set ns = namespace(run='?', fal='?') -%}
+{%   for tok in sv.split() -%}
+{%     set kv = tok.split('=', 1) -%}
+{%     if kv | length == 2 and kv[0] == 'running' -%}{% set ns.run = kv[1] -%}{% endif -%}
+{%     if kv | length == 2 and kv[0] == 'failed' -%}{% set ns.fal = kv[1] -%}{% endif -%}
+{%   endfor -%}
+{%   if ns.fal | int > 0 -%}{% set st.rk = [st.rk, 2] | max -%}{% endif -%}
+  运行中服务 {{ ns.run }} 个 · failed {{ ns.fal }} 个
+{% endif -%}
+
+### 4. 反复重启(疑似不稳定)
+{% set rr = hc_svc_restarts.out | default({'high_restarts': []}) -%}
+{% if rr is mapping and rr.high_restarts -%}
+{%   set st.rk = [st.rk, 1] | max -%}
+  ⚠️ NRestarts ≥ {{ th.service_high_restarts | default(5) }} 的服务: {{ rr.high_restarts | join(', ') }}
+{% elif rr is mapping -%}
+  ✅ 未见高重启计数服务
+{% endif -%}
+
+### 5. 近 24h 系统报错归因(需 root)
+{% if rootok and hc_svc_journal is defined -%}
+{%   if hc_svc_journal.out -%}
+{%     set st.rk = [st.rk, 1] | max -%}
+  近24h err 级日志 Top(按 .service 归因):
+{%     for l in hc_svc_journal.out.splitlines()[:6] -%}
+    · {{ l }}
+{%     endfor -%}
+{%   else -%}
+  ✅ 近24h 无 err 级日志
+{%   endif -%}
+{% else -%}
+  ℹ️ 日志归因需 root,本次跳过
+{% endif -%}
+<!--SEV:{{ R[st.rk|string] }}-->

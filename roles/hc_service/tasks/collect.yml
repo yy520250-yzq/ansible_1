@@ -1,0 +1,100 @@
+---
+# hc_service / collect —— 服务专项采集
+# 1. 关键服务清单逐个探测(存活 + 开机自启)
+- name: 采集关键服务状态
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_timeout: 20
+    hc_var: hc_svc_critical
+    hc_cmd: |
+      {% for s in hc_critical_services | default([]) %}
+      printf '{{ s }}|%s|%s\n' "$(systemctl is-active {{ s }} 2>/dev/null)" "$(systemctl is-enabled {{ s }} 2>/dev/null)"
+      {% endfor %}
+
+# 2. 使能却未在运行的服务(enabled-not-running,含 failed)
+- name: 采集 enabled 但未运行的服务
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_timeout: 30
+    hc_var: hc_svc_dead
+    hc_cmd: |
+      python3 - <<'PY'
+      import subprocess, json, os, re
+      def lines(cmd):
+          return subprocess.run(cmd, shell=True, capture_output=True, text=True).stdout.splitlines()
+      enabled, active = set(), set()
+      for l in lines("systemctl list-unit-files --type=service --state=enabled --no-legend 2>/dev/null"):
+          u = l.split()
+          if u: enabled.add(u[0])
+      for l in lines("systemctl list-units --type=service --state=running,active --no-legend 2>/dev/null"):
+          u = l.split()
+          if u: active.add(u[0])
+      def raw_file(u):
+          for d in ("/etc/systemd/system", "/run/systemd/system",
+                    "/usr/lib/systemd/system", "/lib/systemd/system"):
+              p = os.path.join(d, u)
+              if os.path.isfile(p):
+                  try: return open(p, errors="ignore").read()
+                  except Exception: return ""
+          return ""
+      dead = []
+      for u in sorted(enabled - active):
+          if "@" in u:            # 模板实例(getty@ 等按需拉起),不算失联
+              continue
+          txt = raw_file(u)
+          m = re.search(r"(?im)^\s*Type\s*=\s*(\S+)", txt)
+          t = m.group(1).lower() if m else ""
+          if t == "oneshot" or "RemainAfterExit=yes" in txt:
+              continue            # 一次性/瞬态单元,启动即退出属正常
+          dead.append(u)
+      print(json.dumps({"enabled_not_running": dead}))
+      PY
+
+# 3. 服务总量统计
+- name: 采集服务统计
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_timeout: 20
+    hc_var: hc_svc_stat
+    hc_cmd: |
+      echo "running=$(systemctl list-units --type=service --state=running --no-legend 2>/dev/null | wc -l)"
+      echo "failed=$(systemctl list-units --type=service --state=failed --no-legend 2>/dev/null | wc -l)"
+
+# 4. 反复重启的服务(NRestarts)
+- name: 采集高重启计数服务
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_timeout: 40
+    hc_var: hc_svc_restarts
+    hc_cmd: |
+      python3 - <<'PY'
+      import subprocess, json
+      out = subprocess.run("systemctl show --no-pager '*.service' -p Names,NRestarts,ActiveState 2>/dev/null",
+                           shell=True, capture_output=True, text=True).stdout
+      cur, rec = {}, []
+      def flush():
+          if cur.get("name") and cur.get("nrestarts", 0) >= 5:
+              rec.append(cur["name"])
+      for line in out.splitlines():
+          if not line.strip():
+              flush(); cur = {}; continue
+          if "=" in line:
+              k, v = line.split("=", 1)
+              if k == "Names": cur["name"] = v.split()[0]
+              elif k == "NRestarts":
+                  try: cur["nrestarts"] = int(v or 0)
+                  except Exception: cur["nrestarts"] = 0
+      flush()
+      print(json.dumps({"high_restarts": rec}))
+      PY
+
+# 5. 近 24h 报错服务 Top(需 root)
+- name: 采集近24h错误日志归因(需 root)
+  include_role: {name: hc_common, tasks_from: exec}
+  when: hc_root_ok | default(false)
+  vars:
+    hc_timeout: 40
+    hc_become: true
+    hc_var: hc_svc_journal
+    hc_cmd: |
+      journalctl --since '24 hours ago' -p err --no-pager 2>/dev/null | grep -oE '[A-Za-z0-9_.-]+\.service' | sort | uniq -c | sort -rn | head -8

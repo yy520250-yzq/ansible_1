@@ -37,21 +37,21 @@ hc_thresholds:
   failed_login_warn: 10
   # 关键服务里处于 failed 状态即整体 crit
   service_failed_crit: true
+  # 服务反复重启计数超过即告警
+  service_high_restarts: 5
 
 # ---------- 专项开关(未来各专项共用) ----------
 hc_profiles:
   os: true          # 系统通用(已实现)
   security: true    # 安全专项(已实现)
   network: false    # 网络专项(下一阶段)
-  service: false    # 服务专项
+  service: true     # 服务专项(已实现)
   memory: false     # 内存专项
   disk: false       # 磁盘专项
   k8s: false        # k8s 专项
   cloud: false      # 云专项
 
-# ---------- 关键服务清单(服务专项阶段启用) ----------
-# hc_critical_services:
-#   - nginx
-#   - docker
-#   - postgresql
-hc_critical_services: []
+# ---------- 关键服务清单(服务专项) ----------
+# 面板/命令行可随时用 -e 覆盖;列在这里的都会被盯"存活+开机自启"
+hc_critical_services:
+  - docker

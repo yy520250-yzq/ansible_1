@@ -1,0 +1,16 @@
+---
+# hc_service / render
+- name: 渲染服务段正文
+  ansible.builtin.set_fact:
+    hc_section_service_body: "{{ lookup('template', 'body.md.j2') }}"
+    hc_section_service_title: "服务专项巡检"
+
+- name: 提取段级严重度
+  ansible.builtin.set_fact:
+    hc_section_service_severity: >-
+      {{ 'crit' if '<!--SEV:crit-->' in hc_section_service_body
+         else ('warn' if '<!--SEV:warn-->' in hc_section_service_body else 'ok') }}
+
+- name: 剥离 SEV 标记
+  ansible.builtin.set_fact:
+    hc_section_service_body: "{{ hc_section_service_body | regex_replace('<!--SEV:[a-z]+-->', '') }}"
