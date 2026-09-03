@@ -1,0 +1,28 @@
+---
+# 示例能力:安装并启动 nginx
+# 用法:ansible-playbook playbooks/toolbox.yml -e "target=localhost tool=nginx"
+- name: 更新软件源缓存 (仅 Debian 系)
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+  when: ansible_os_family == "Debian"
+  tags: [install]
+
+- name: 安装 nginx
+  ansible.builtin.package:
+    name: nginx
+    state: present
+  tags: [install]
+
+- name: 启动并设开机自启
+  ansible.builtin.service:
+    name: nginx
+    state: started
+    enabled: true
+  tags: [install]
+
+- name: 确认 80 端口已在监听
+  ansible.builtin.wait_for:
+    port: 80
+    timeout: 10
+  tags: [verify]

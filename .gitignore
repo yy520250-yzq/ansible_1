@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.retry
+.DS_Store
+.env
+*.log
+# ansible-vault 密码文件(严禁入库)
+.vault_pass
+vault-pass*

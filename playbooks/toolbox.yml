@@ -1,0 +1,15 @@
+---
+# 通用工具箱入口:跑哪个 role 由 tool 变量决定,打哪台机器由 target 决定
+#
+# 本地用法:
+#   ansible-playbook playbooks/toolbox.yml -e "target=localhost tool=nginx"
+#
+# 平台(Semaphore/AWX)用法:模板固定 tool=xxx,Inventory 决定 target;也可让 target
+# 变成每次执行前填写的表单字段,一个模板就能打任意机器。
+- name: 运维工具箱 - 按需执行 role
+  hosts: "{{ target | default('all') }}"
+  gather_facts: true
+  tasks:
+    - name: "执行所选 tool: {{ tool }}"
+      ansible.builtin.include_role:
+        name: "{{ tool }}"
