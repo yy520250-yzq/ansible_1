@@ -9,6 +9,7 @@
   include_role: {name: hc_common, tasks_from: exec}
   vars:
     hc_timeout: 20
+    hc_json: true
     hc_var: hc_sec_sshd
     hc_cmd: |
       python3 - <<'PY'
@@ -41,6 +42,7 @@
   include_role: {name: hc_common, tasks_from: exec}
   vars:
     hc_timeout: 20
+    hc_json: true
     hc_var: hc_sec_ports
     hc_cmd: |
       python3 - <<'PY'
@@ -81,6 +83,7 @@
   include_role: {name: hc_common, tasks_from: exec}
   vars:
     hc_timeout: 15
+    hc_json: true
     hc_var: hc_sec_logindefs
     hc_cmd: |
       python3 - <<'PY'
@@ -129,6 +132,7 @@
   vars:
     hc_timeout: 20
     hc_become: true
+    hc_json: true
     hc_var: hc_sec_empty
     hc_cmd: |
       python3 - <<'PY'
@@ -151,6 +155,7 @@
   vars:
     hc_timeout: 40
     hc_become: true
+    hc_json: true
     hc_var: hc_sec_suid
     hc_cmd: |
       python3 - <<'PY'
@@ -168,6 +173,7 @@
   vars:
     hc_timeout: 20
     hc_become: true
+    hc_json: true
     hc_var: hc_sec_cron
     hc_cmd: |
       python3 - <<'PY'

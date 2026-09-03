@@ -27,5 +27,10 @@
   ansible.builtin.set_fact:
     "{{ hc_var }}":
       rc: "{{ hc_exec_raw.rc | default(999) }}"
-      out: "{{ hc_exec_raw.stdout | default('') }}"
+      out: >-
+        {%- if not (hc_json | default(false)) -%}
+        {{ hc_exec_raw.stdout | default('') }}
+        {%- else -%}
+        {{ '' if (hc_exec_raw.stdout | default('')) | trim == '' else (hc_exec_raw.stdout | default('') | from_json) }}
+        {%- endif -%}
       err: "{{ hc_exec_raw.stderr | default('') }}"
