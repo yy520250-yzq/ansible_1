@@ -1,0 +1,26 @@
+---
+# ============================================================
+# 主机日常巡检入口(通用 + 各专项)
+# 用法:  ansible-playbook playbooks/inspect.yml
+#  只查指定机器:  -e target=web01
+# 专项开关见 group_vars/healthcheck.yml 的 hc_profiles
+# ============================================================
+- name: 主机健康巡检(采集 → 判定 → 报告)
+  hosts: "{{ target | default('local') }}"
+  gather_facts: true
+  any_errors_fatal: false
+
+  tasks:
+    - name: "hc_profiles.os 开关: {{ hc_profiles.os | default(true) }}"
+      ansible.builtin.debug:
+        msg: "开始系统通用巡检: {{ inventory_hostname }}"
+
+    - name: 系统通用专项巡检
+      ansible.builtin.include_role:
+        name: hc_os
+      when: hc_profiles.os | default(true)
+
+    - name: 生成 Markdown / JSON 报告
+      ansible.builtin.include_role:
+        name: hc_common
+        tasks_from: report

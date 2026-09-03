@@ -1,0 +1,242 @@
+---
+# ============================================================
+# hc_os / collect —— 采集阶段(只采集,不做判定;判定见 body.md.j2)
+# 所有命令经由 hc_common.exec 安全通道:
+#   失败不中断、root 不足自动降级(结果为空 → 渲染层标 N/A)
+# ============================================================
+
+# ---------- 基础:运行时长 / 负载 / 核数 ----------
+- name: 采集 uptime
+  include_role: {name: hc_common, tasks_from: exec}
+  vars: {hc_cmd: "uptime", hc_var: hc_os_up, hc_timeout: 10}
+
+- name: 采集 loadavg
+  include_role: {name: hc_common, tasks_from: exec}
+  vars: {hc_cmd: "cat /proc/loadavg", hc_var: hc_os_load, hc_timeout: 10}
+
+- name: 采集 CPU 核数
+  include_role: {name: hc_common, tasks_from: exec}
+  vars: {hc_cmd: "nproc", hc_var: hc_os_nproc, hc_timeout: 10}
+
+# ---------- 内存 / Swap(结构化 JSON) ----------
+- name: 采集内存与 swap
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_timeout: 20
+    hc_var: hc_os_mem
+    hc_cmd: |
+      python3 - <<'PY'
+      import json
+      keys = ("MemTotal","MemAvailable","SwapTotal","SwapFree")
+      d = {}
+      try:
+          for line in open("/proc/meminfo"):
+              parts = line.split()
+              if parts and parts[0].rstrip(":") in keys:
+                  d[parts[0].rstrip(":")] = int(parts[1])
+      except Exception as e:
+          d = {"error": str(e)}
+      print(json.dumps(d))
+      PY
+
+# ---------- 磁盘:容量 + inode 双维度(结构化 JSON) ----------
+- name: 采集磁盘容量与 inode
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_timeout: 30
+    hc_var: hc_os_df
+    hc_cmd: |
+      python3 - <<'PY'
+      import subprocess, json
+      real_types = {"ext2","ext3","ext4","xfs","btrfs","zfs","overlay","vfat","ntfs","fuseblk"}
+      def sh(c):
+          return subprocess.run(c, shell=True, capture_output=True, text=True).stdout.splitlines()
+      ino = {}
+      for line in sh("df -iP 2>/dev/null")[1:]:
+          p = line.split()
+          if len(p) >= 6:
+              ino[" ".join(p[5:])] = p[4].rstrip("%")   # mount -> inode 使用%
+      out = []
+      for line in sh("df -PT 2>/dev/null")[1:]:
+          p = line.split()
+          if len(p) < 7:
+              continue
+          fstype = p[1]
+          if fstype not in real_types:
+              continue
+          mount = " ".join(p[6:])
+          cap = p[5].rstrip("%")
+          try:
+              item = {"fs": p[0], "type": fstype, "mount": mount,
+                      "cap_pct": int(cap), "inode_pct": int(ino.get(mount, "-1"))}
+          except ValueError:
+              continue
+          out.append(item)
+      out.sort(key=lambda x: x["cap_pct"], reverse=True)
+      print(json.dumps(out))
+      PY
+
+# ---------- 进程:CPU/MEM Top + 进程统计 ----------
+- name: 采集 CPU Top 进程
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_cmd: "ps -eo pcpu=,pmem=,rss=,comm= --sort=-pcpu 2>/dev/null | head -6 | awk '{printf \"%.1f%% %s %.0fMB %s\\n\", $1, $2, $3/1024, $4}'"
+    hc_var: hc_os_pscpu
+    hc_timeout: 15
+
+- name: 采集内存 Top 进程
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_cmd: "ps -eo pcpu=,pmem=,rss=,comm= --sort=-rss 2>/dev/null | head -6 | awk '{printf \"%.1f%% %s %.0fMB %s\\n\", $1, $2, $3/1024, $4}'"
+    hc_var: hc_os_psmem
+    hc_timeout: 15
+
+- name: 采集进程统计(总数/僵尸/线程)
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_timeout: 30
+    hc_var: hc_os_psstat
+    hc_cmd: |
+      printf 'total=%s\nzombie=%s\nthreads=%s\n' \
+        "$(ps -e --no-headers 2>/dev/null | wc -l)" \
+        "$(ps -eo stat= 2>/dev/null | grep -c '^Z')" \
+        "$(ps -eLf --no-headers 2>/dev/null | wc -l)"
+
+# ---------- 网络:接口错误 / 连接数 ----------
+- name: 采集网卡错误与丢包
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_timeout: 20
+    hc_var: hc_os_netdev
+    hc_cmd: |
+      python3 - <<'PY'
+      import json
+      out = []
+      try:
+          lines = open("/proc/net/dev").read().splitlines()
+          for l in lines[2:]:
+              iface, data = l.split(":", 1)
+              v = data.split()
+              if len(v) < 16:
+                  continue
+              name = iface.strip()
+              if name == "lo":
+                  continue
+              rxerr, rxdrop = int(v[2]), int(v[3])
+              txerr, txdrop = int(v[10]), int(v[11])
+              if rxerr or rxdrop or txerr or txdrop:
+                  out.append({"iface": name, "rxerr": rxerr, "rxdrop": rxdrop,
+                              "txerr": txerr, "txdrop": txdrop})
+      except Exception as e:
+          out.append({"error": str(e)})
+      print(json.dumps(out))
+      PY
+
+- name: 采集 TCP 连接统计与监听
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_timeout: 20
+    hc_var: hc_os_net
+    hc_cmd: |
+      printf 'listen=%s\nestab=%s\n' \
+        "$(ss -H -tln 2>/dev/null | wc -l)" \
+        "$(ss -H -tn state established 2>/dev/null | wc -l)"
+
+# ---------- 用户 / 登录 ----------
+- name: 采集 UID=0 账号与可登录用户
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_timeout: 20
+    hc_var: hc_os_users
+    hc_cmd: |
+      python3 - <<'PY'
+      import pwd, json
+      res = {"uid0": [], "shells": []}
+      try:
+          for u in pwd.getpwall():
+              if u.pw_uid == 0:
+                  res["uid0"].append(u.pw_name)
+              if u.pw_uid >= 1000 and u.pw_shell.rstrip().endswith(("sh", "bash", "zsh")):
+                  res["shells"].append(u.pw_name)
+      except Exception as e:
+          res["error"] = str(e)
+      print(json.dumps(res))
+      PY
+
+- name: 采集最近登录记录(需 root)
+  include_role: {name: hc_common, tasks_from: exec}
+  when: hc_root_ok | default(false)
+  vars:
+    hc_timeout: 15
+    hc_become: true
+    hc_var: hc_os_last
+    hc_cmd: "last -n 8 -F 2>/dev/null"
+
+- name: 采集失败登录统计(需 root)
+  include_role: {name: hc_common, tasks_from: exec}
+  when: hc_root_ok | default(false)
+  vars:
+    hc_timeout: 30
+    hc_become: true
+    hc_var: hc_os_badlogin
+    hc_cmd: |
+      python3 - <<'PY'
+      import re, glob, json
+      ips, n = {}, 0
+      for gp in ("/var/log/auth.log*", "/var/log/secure*"):
+          for f in sorted(glob.glob(gp)):
+              try:
+                  for l in open(f, errors="ignore"):
+                      if "Failed password" in l:
+                          n += 1
+                          m = re.search(r"from (\S+)", l)
+                          if m: ips[m.group(1)] = ips.get(m.group(1), 0) + 1
+              except Exception:
+                  pass
+      print(json.dumps({"count": n, "top": sorted(ips.items(), key=lambda x: -x[1])[:5]}))
+      PY
+
+- name: 采集当前在线用户
+  include_role: {name: hc_common, tasks_from: exec}
+  vars: {hc_cmd: "who 2>/dev/null || echo '__UNREADABLE__'", hc_var: hc_os_who, hc_timeout: 10}
+
+# ---------- 内核 / 系统事件 ----------
+- name: 采集 dmesg 异常计数(需 root)
+  include_role: {name: hc_common, tasks_from: exec}
+  when: hc_root_ok | default(false)
+  vars:
+    hc_timeout: 30
+    hc_become: true
+    hc_var: hc_os_dmesg
+    hc_cmd: "dmesg -T 2>/dev/null | grep -icE 'out of memory|oom-kill|panic|BUG:|I/O error|Killed process' || echo 0"
+
+- name: 采集重启历史(需 root)
+  include_role: {name: hc_common, tasks_from: exec}
+  when: hc_root_ok | default(false)
+  vars:
+    hc_timeout: 15
+    hc_become: true
+    hc_var: hc_os_reboot
+    hc_cmd: "last reboot 2>/dev/null | head -5"
+
+- name: 采集是否需要重启(补丁后)
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_cmd: "cat /var/run/reboot-required 2>/dev/null || echo no"
+    hc_var: hc_os_rebootreq
+    hc_timeout: 10
+
+# ---------- 服务 / 时间 ----------
+- name: 采集 systemd failed 服务
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_timeout: 20
+    hc_var: hc_os_failed
+    hc_cmd: "systemctl --no-legend --no-pager --type=service --state=failed list-units 2>/dev/null | awk '{ for(i=1;i<=NF;i++){ if($i ~ /\\.service/) { print $i; break } } }' | head -10"
+
+- name: 采集时间同步状态
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_timeout: 15
+    hc_var: hc_os_timesync
+    hc_cmd: "timedatectl 2>/dev/null | grep -iE 'synchronized|Time zone' || echo '__N/A__'"

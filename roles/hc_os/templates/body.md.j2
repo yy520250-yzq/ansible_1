@@ -1,0 +1,228 @@
+{# ============================================================
+   hc_os 判定模板:读 collect.yml 采集的 hc_os_* 事实,
+   按 healthcheck.yml 阈值判级,输出本段 Markdown 正文。
+   严重度以数字 rank 记录(0 ok / 1 warn / 2 crit),只在末尾映射。
+   首行注释 <!--SEV:xxx--> 由 render.yml 提取为段级严重度。
+   ============================================================ -#}
+{% set th = hc_thresholds | default({}) -%}
+{% set S = {'ok':'✅','warn':'⚠️','crit':'❌','info':'ℹ️'} -%}
+{% set st = namespace(rk=0) -%}
+{% set rootok = hc_root_ok | default(false) -%}
+{% set R = {'0':'ok','1':'warn','2':'crit'} -%}
+
+### 1. 运行时长与负载
+{% set upraw = hc_os_up.out | default('') -%}
+{% if upraw and upraw.splitlines() -%}
+  {{ upraw.splitlines()[0].strip() }}
+{% else -%}
+  ℹ️ uptime 不可用
+{% endif -%}
+{% set lraw = hc_os_load.out | default('') -%}
+{% if lraw -%}
+{%   set lt = lraw.split() -%}
+{%   set l1 = (lt[0] if lt | length > 0 else '0') | float -%}
+{%   set l5 = (lt[1] if lt | length > 1 else '0') | float -%}
+{%   set l15 = (lt[2] if lt | length > 2 else '0') | float -%}
+{%   set nraw = hc_os_nproc.out | default('') -%}
+{%   set cores = (nraw | trim | int) if (nraw and nraw.strip()) else 1 -%}
+{%   set factor = (l1 / cores) if cores > 0 else 0 -%}
+{%   if factor >= th.load_factor_crit | default(2.0) -%}
+{%     set st.rk = 2 -%}
+{%   elif factor >= th.load_factor_warn | default(1.0) -%}
+{%     set st.rk = [st.rk, 1] | max -%}
+{%   endif -%}
+  load 1/5/15 = {{ '%.2f' | format(l1) }} / {{ '%.2f' | format(l5) }} / {{ '%.2f' | format(l15) }} · CPU {{ cores }} 核 · 负载系数 {{ '%.2f' | format(factor) }}
+{%   if st.rk > 0 -%}
+    ⚠️ 负载已超告警线(建议线: 核数 × {{ th.load_factor_warn | default(1.0) }}, 严重线 × {{ th.load_factor_crit | default(2.0) }})
+{%   endif -%}
+{% else -%}
+  ℹ️ 负载数据不可用
+{% endif -%}
+
+### 2. 内存与 Swap
+{% set m = hc_os_mem.out | default({}) -%}
+{% if m is mapping -%}
+{%   set MT = m.get('MemTotal', 0) | int -%}
+{%   set MA = m.get('MemAvailable', 0) | int -%}
+{%   set ST = m.get('SwapTotal', 0) | int -%}
+{%   set SF = m.get('SwapFree', 0) | int -%}
+{%   if MT > 0 -%}
+{%     set memused = 100 - (MA * 100 / MT) -%}
+{%     if memused >= th.mem_used_crit | default(90) -%}{% set st.rk = 2 -%}
+{%     elif memused >= th.mem_used_warn | default(80) -%}{% set st.rk = [st.rk, 1] | max -%}
+{%     endif -%}
+  内存: 总量 {{ (MT / 1024 / 1024) | round(1) }}GB · 可用 {{ (MA / 1024 / 1024) | round(1) }}GB · 已用 {{ '%.1f' | format(memused) }}%
+{%   else -%}
+  内存数据异常(读不到 MemTotal)
+{%   endif -%}
+{%   if ST > 0 -%}
+{%     set sw = (ST - SF) * 100 / ST -%}
+{%     if sw >= th.swap_used_crit | default(80) -%}{% set st.rk = 2 -%}
+{%     elif sw >= th.swap_used_warn | default(40) -%}{% set st.rk = [st.rk, 1] | max -%}
+{%     endif -%}
+  Swap: 总量 {{ (ST / 1024 / 1024) | round(1) }}GB · 已用 {{ '%.1f' | format(sw) }}%
+{%   else -%}
+  Swap: 未配置(若内存长期吃紧建议补)
+{%   endif -%}
+{% else -%}
+  ℹ️ 内存数据不可用
+{% endif -%}
+
+### 3. 磁盘容量与 inode
+{% set dfj = hc_os_df.out | default([]) -%}
+{% if dfj is iterable and dfj is not string -%}
+{%   if dfj -%}
+{%     set rows = [] -%}
+{%     for m in dfj -%}
+{%       set rmax = 0 -%}
+{%       if m.cap_pct >= th.disk_cap_crit | default(90) -%}{% set rmax = 2 -%}
+{%       elif m.cap_pct >= th.disk_cap_warn | default(80) -%}{% set rmax = 1 -%}
+{%       endif -%}
+{%       if m.inode_pct >= 0 -%}
+{%         if m.inode_pct >= th.inode_crit | default(95) -%}{% set rmax = 2 -%}
+{%         elif m.inode_pct >= th.inode_warn | default(85) -%}{% if rmax < 1 %}{% set rmax = 1 %}{% endif -%}
+{%         endif -%}
+{%       endif -%}
+{%       set _ = rows.append(rmax) -%}
+  {{ S[R[rmax|string]] }} {{ m.mount }}  ({{ m.type }} {{ m.fs }}):  容量 {{ m.cap_pct }}%  |  inode {{ m.inode_pct if m.inode_pct >= 0 else 'N/A' }}%
+{%     endfor -%}
+{%     if 2 in rows -%}{% set st.rk = 2 -%}
+{%     elif 1 in rows -%}{% set st.rk = [st.rk, 1] | max -%}
+{%     endif -%}
+{%   else -%}
+  ✅ 无匹配的实体磁盘挂载点(范围: ext*/xfs/btrfs/overlay 等)
+{%   endif -%}
+{% else -%}
+  ℹ️ 磁盘数据不可用
+{% endif -%}
+
+### 4. 进程健康
+{% set ps = namespace(tot='?', zom=0, thr='?') -%}
+{% set psraw = hc_os_psstat.out | default('') -%}
+{% for line in psraw.splitlines() -%}
+{%   set kv = line.split('=', 1) -%}
+{%   if kv | length == 2 -%}
+{%     if kv[0] == 'total' -%}{% set ps.tot = kv[1] -%}
+{%     elif kv[0] == 'zombie' -%}{% set ps.zom = kv[1] | int -%}
+{%     elif kv[0] == 'threads' -%}{% set ps.thr = kv[1] -%}
+{%     endif -%}
+{%   endif -%}
+{% endfor -%}
+{% if psraw -%}
+{%   if ps.zom >= th.zombie_warn | default(5) -%}{% set st.rk = [st.rk, 1] | max -%}{% endif -%}
+  进程数 {{ ps.tot }} · 线程数 {{ ps.thr }} · 僵尸进程 {{ ps.zom }}{% if ps.zom > 0 %} ⚠️ 存在僵尸,建议排查父进程/重启相关服务{% endif %}
+{% else -%}
+  ℹ️ 进程统计不可用
+{% endif %}
+
+{% set cpur = hc_os_pscpu.out | default('') %}
+{% if cpur %}
+  CPU Top:
+{%   for l in cpur.splitlines() -%}
+    · {{ l }}
+{%   endfor -%}
+{% endif %}
+
+{% set memr = hc_os_psmem.out | default('') %}
+{% if memr %}
+  内存 Top:
+{%   for l in memr.splitlines() -%}
+    · {{ l }}
+{%   endfor -%}
+{% endif %}
+
+### 5. 网络
+{% set nd = hc_os_netdev.out | default([]) -%}
+{% if nd is iterable and nd is not string -%}
+{%   set dw = th.net_drop_warn | default(100) -%}
+{%   if nd -%}
+{%     set netflag = namespace(warn=false) -%}
+{%     for x in nd -%}
+{%       if (x.rxerr | int) > 0 or (x.txerr | int) > 0 or (x.rxdrop | int) > dw or (x.txdrop | int) > dw -%}{% set netflag.warn = true -%}{% endif -%}
+{%     endfor -%}
+{%     if netflag.warn -%}{% set st.rk = [st.rk, 1] | max -%}{% endif -%}
+{%     for x in nd -%}
+  {{ '⚠️' if ((x.rxerr | int) > 0 or (x.txerr | int) > 0 or (x.rxdrop | int) > dw or (x.txdrop | int) > dw) else 'ℹ️' }} {{ x.iface }}: 收错 {{ x.rxerr }} / 收丢 {{ x.rxdrop }} · 发错 {{ x.txerr }} / 发丢 {{ x.txdrop }}
+{%     endfor -%}
+{%   else -%}
+  ✅ 网卡无错误/丢包计数(排除 lo)
+{%   endif -%}
+{% else -%}
+  ℹ️ 网卡统计不可用
+{% endif -%}
+{% set netraw = hc_os_net.out | default('') -%}
+{% if netraw -%}
+{%   set ns2 = namespace(ln=0, es=0) -%}
+{%   for tok in netraw.split() -%}
+{%     set kv = tok.split('=') -%}
+{%     if kv | length == 2 and kv[0] == 'listen' -%}{% set ns2.ln = kv[1] | int -%}{% endif -%}
+{%     if kv | length == 2 and kv[0] == 'estab' -%}{% set ns2.es = kv[1] | int -%}{% endif -%}
+{%   endfor -%}
+  TCP 监听端口 {{ ns2.ln }} 个 · 已建立连接 {{ ns2.es }} 个
+{% endif -%}
+
+### 6. 用户与登录
+{% set ud = hc_os_users.out | default({}) -%}
+{% if ud is mapping -%}
+  UID=0 账号: {{ ud.get('uid0', []) | join(' ') if ud.get('uid0') else '(仅 root)' }}
+  可登录普通用户: {{ ud.get('shells', []) | join(' ') if ud.get('shells') else '(无)' }}
+{% else -%}
+  ℹ️ passwd 数据不可用
+{% endif -%}
+{% if rootok and hc_os_badlogin is defined and hc_os_badlogin.out is mapping -%}
+{%   set bl = hc_os_badlogin.out -%}
+{%   if bl.get('count', 0) | int > 0 -%}
+{%     if bl.get('count') | int >= th.failed_login_warn | default(10) -%}{% set st.rk = [st.rk, 1] | max -%}{% endif -%}
+  ⚠️ 历史失败登录 {{ bl.count }} 次(来源 Top): {% for ip, c in bl.top %}{{ ip }}({{ c }}) {% endfor %}
+{%   else -%}
+  ✅ 未发现失败登录记录
+{%   endif -%}
+{% endif -%}
+{% if not rootok -%}
+  ℹ️ 失败登录/最近登录/重启历史: 需 root,本次跳过(可在连接账号配免密 sudo 后完整体检)
+{% endif -%}
+{% if rootok and hc_os_last is defined and hc_os_last.out is defined and hc_os_last.out -%}
+  最近登录(last):
+{%   for l in hc_os_last.out.splitlines()[:8] -%}
+    · {{ l }}
+{%   endfor -%}
+{% endif -%}
+{% set whor = hc_os_who.out | default('') -%}
+{% if whor and '__UNREADABLE__' not in whor and '__' not in whor -%}
+  当前在线: {{ whor.splitlines() | length }} 人
+{% endif -%}
+
+### 7. 服务 · 内核 · 时间
+{% set fr = hc_os_failed.out | default('') -%}
+{% if fr -%}
+  ❌ systemd 存在 failed 服务: {{ fr.splitlines() | join(', ') }}
+{%   set st.rk = 2 -%}
+{% else -%}
+  ✅ 无 failed 服务
+{% endif -%}
+{% set rr = hc_os_rebootreq.out | default('') -%}
+{% if rr and rr.strip() != 'no' -%}
+  ⚠️ 系统提示需重启(存在待生效更新): {{ rr.strip() }}
+{%   set st.rk = [st.rk, 1] | max -%}
+{% endif -%}
+{% set tr = hc_os_timesync.out | default('') -%}
+{% if tr and '__N/A__' not in tr -%}
+{%   if 'synchronized: yes' in tr -%}
+{%     set tz = tr.splitlines() | select('search', 'Time zone') | first | default('') | trim -%}
+  时间同步: 正常 · {{ tz }}
+{%   else -%}
+  ⚠️ 时间同步状态异常(检查 chronyd / systemd-timesyncd)
+{%     set st.rk = [st.rk, 1] | max -%}
+{%   endif -%}
+{% endif -%}
+{% if rootok and hc_os_dmesg is defined and hc_os_dmesg.out is defined and hc_os_dmesg.out | trim != '' and hc_os_dmesg.out | trim | int > 0 -%}
+  ⚠️ 内核异常日志计数(dmesg 近期): {{ hc_os_dmesg.out | trim }}
+{%   set st.rk = [st.rk, 1] | max -%}
+{% endif -%}
+{% if rootok and hc_os_reboot is defined and hc_os_reboot.out is defined and hc_os_reboot.out -%}
+  重启历史(last reboot):
+{%   for l in hc_os_reboot.out.splitlines()[:4] -%}
+    · {{ l }}
+{%   endfor -%}
+{% endif -%}
+<!--SEV:{{ R[st.rk|string] }}-->

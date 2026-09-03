@@ -1,0 +1,19 @@
+---
+# ============================================================
+# hc_os / render —— 判定层:渲染段正文 + 提取段级严重度
+# 正文由 body.md.j2 按阈值判定生成;首行 <!--SEV:xxx--> 供提取
+# ============================================================
+- name: 渲染系统段正文
+  ansible.builtin.set_fact:
+    hc_section_os_body: "{{ lookup('template', 'body.md.j2') }}"
+    hc_section_os_title: "系统通用巡检"
+
+- name: 提取段级严重度(ok/warn/crit)
+  ansible.builtin.set_fact:
+    hc_section_os_severity: >-
+      {{ 'crit' if '<!--SEV:crit-->' in hc_section_os_body
+         else ('warn' if '<!--SEV:warn-->' in hc_section_os_body else 'ok') }}
+
+- name: 从正文剥离 SEV 标记
+  ansible.builtin.set_fact:
+    hc_section_os_body: "{{ hc_section_os_body | regex_replace('<!--SEV:[a-z]+-->', '') }}"

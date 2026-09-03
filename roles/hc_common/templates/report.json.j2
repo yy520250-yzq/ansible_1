@@ -1,0 +1,31 @@
+{% set keys = ['os','security','network','service','memory','disk','k8s','cloud'] -%}
+{% set sev_rank = {'ok':0,'info':0,'warn':1,'crit':2} -%}
+{% set present = [] -%}
+{% for k in keys -%}
+{%   if ('hc_section_' + k + '_body') in vars -%}{% set _ = present.append(k) -%}{% endif -%}
+{% endfor -%}
+{% set ranked = [] -%}
+{% for k in present -%}
+{%   set _ = ranked.append([sev_rank.get(vars.get('hc_section_' + k + '_severity','ok'),0), vars.get('hc_section_' + k + '_severity','ok'), k]) -%}
+{% endfor -%}
+{% set worst = (ranked | sort(reverse=true))[0][1] if ranked else 'ok' -%}
+{% set osline = ansible_distribution ~ ' ' ~ ansible_distribution_version -%}
+{
+  "generator": "ansible_1 healthcheck",
+  "host": {{ (ansible_hostname | default(inventory_hostname)) | tojson }},
+  "date": {{ ansible_date_time.date | tojson }},
+  "time": {{ ansible_date_time.time | tojson }},
+  "os": {{ osline | tojson }},
+  "kernel": {{ ansible_kernel | tojson }},
+  "verdict": {{ worst | tojson }},
+  "sections": [
+{% for k in present -%}
+    {
+      "key": {{ k | tojson }},
+      "title": {{ vars.get('hc_section_' + k + '_title', k) | tojson }},
+      "severity": {{ vars.get('hc_section_' + k + '_severity','ok') | tojson }},
+      "body": {{ vars.get('hc_section_' + k + '_body','') | tojson }}
+    }{% if not loop.last %},{% endif %}
+{% endfor -%}
+  ]
+}

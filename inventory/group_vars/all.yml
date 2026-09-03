@@ -1,0 +1,57 @@
+---
+# 所有主机通用的变量;各主机单独的要放进 host_vars/ 或用平台表单按次传入
+# 例:
+# nginx_listen_port: 80
+# ============================================================
+#  巡检体系 全局配置
+#  所有判定阈值都在这里调,不改任何 role 代码
+# ============================================================
+
+# ---------- 报告 ----------
+# 报告落点(在被检主机上);生产服务器可改为 /var/log/ops-healthcheck
+hc_report_dir: "{{ ansible_env.HOME }}/ops-healthcheck"
+hc_report_retain_days: 30
+
+# ---------- 判定阈值 ----------
+hc_thresholds:
+  # 磁盘容量使用率 %
+  disk_cap_warn: 80
+  disk_cap_crit: 90
+  # 磁盘 inode 使用率 %
+  inode_warn: 85
+  inode_crit: 95
+  # 负载 = 1 分钟 load / CPU 核数(倍率)。>1 表示排队
+  load_factor_warn: 1.0
+  load_factor_crit: 2.0
+  # 真实可用内存不足(即 used 超过)% 记为 crit;超过 warn 记为 warn
+  mem_used_warn: 80
+  mem_used_crit: 90
+  # swap 用量占比(0~100),>0 且有 swap 时才判
+  swap_used_warn: 40
+  swap_used_crit: 80
+  # 僵尸进程个数(超过即 warn)
+  zombie_warn: 5
+  # 网卡累计错误>0 或 丢包>该值 才告警(桥接/docker 常态丢包属噪声)
+  net_drop_warn: 100
+  # 最近日志中的 ssh 失败登录次数(超过即 warn)
+  failed_login_warn: 10
+  # 关键服务里处于 failed 状态即整体 crit
+  service_failed_crit: true
+
+# ---------- 专项开关(未来各专项共用) ----------
+hc_profiles:
+  os: true          # 系统通用(本阶段已实现)
+  security: false   # 安全专项(下一阶段)
+  network: false    # 网络专项
+  service: false    # 服务专项
+  memory: false     # 内存专项
+  disk: false       # 磁盘专项
+  k8s: false        # k8s 专项
+  cloud: false      # 云专项
+
+# ---------- 关键服务清单(服务专项阶段启用) ----------
+# hc_critical_services:
+#   - nginx
+#   - docker
+#   - postgresql
+hc_critical_services: []

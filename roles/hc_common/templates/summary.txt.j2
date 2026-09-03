@@ -1,0 +1,25 @@
+{% set keys = ['os','security','network','service','memory','disk','k8s','cloud'] -%}
+{% set sev_rank = {'ok':0,'info':0,'warn':1,'crit':2} -%}
+{% set sev_icon = {'ok':'✅','warn':'⚠️','crit':'❌','info':'ℹ️'} -%}
+{% set present = [] -%}
+{% for k in keys -%}
+{%   if ('hc_section_' + k + '_body') in vars -%}{% set _ = present.append(k) -%}{% endif -%}
+{% endfor -%}
+{% set ranked = [] -%}
+{% for k in present -%}
+{%   set _ = ranked.append([sev_rank.get(vars.get('hc_section_' + k + '_severity','ok'),0), vars.get('hc_section_' + k + '_severity','ok'), k]) -%}
+{% endfor -%}
+{% set ranks = ranked | map('first') | list -%}
+{% set worst = (ranked | sort(reverse=true))[0][1] if ranked else 'ok' -%}
+巡检摘要 · {{ ansible_hostname | default(inventory_hostname) }} · {{ ansible_date_time.date }} {{ ansible_date_time.time }}
+总评: {{ sev_icon.get(worst,'❓') }} {{ worst }}
+{% for k in present -%}
+  {{ sev_icon.get(vars.get('hc_section_' + k + '_severity','ok'),'ℹ️') }} [{{ k }}] {{ vars.get('hc_section_' + k + '_title', k) }} —— {{ vars.get('hc_section_' + k + '_severity','ok') }}
+{% endfor -%}
+{% if not ranks -%}
+无任何专项输出。
+{% elif ranks | max == 0 -%}
+全部项目正常。
+{% else -%}
+有 {{ ranks | select('eq',1) | list | length }} 项告警 / {{ ranks | select('eq',2) | list | length }} 项关键问题,详见完整报告。
+{% endif -%}

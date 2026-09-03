@@ -1,0 +1,26 @@
+{% set keys = ['os','security','network','service','memory','disk','k8s','cloud'] -%}
+{% set sev_rank = {'ok':0,'info':0,'warn':1,'crit':2} -%}
+{% set sev_icon = {'ok':'✅','warn':'⚠️','crit':'❌','info':'ℹ️'} -%}
+{% set sev_text = {'ok':'正常','warn':'有告警','crit':'有关键问题','info':'仅供参考'} -%}
+{% set present = [] -%}
+{% for k in keys -%}
+{%   if ('hc_section_' + k + '_body') in vars -%}{% set _ = present.append(k) -%}{% endif -%}
+{% endfor -%}
+{% set ranked = [] -%}
+{% for k in present -%}
+{%   set _ = ranked.append([sev_rank.get(vars.get('hc_section_' + k + '_severity','ok'),0), vars.get('hc_section_' + k + '_severity','ok'), k]) -%}
+{% endfor -%}
+{% set worst = (ranked | sort(reverse=true))[0][1] if ranked else 'ok' -%}
+# 巡检报告 · {{ ansible_hostname | default(inventory_hostname) }} · {{ ansible_date_time.date }} {{ ansible_date_time.time }}
+
+系统: {{ ansible_distribution }} {{ ansible_distribution_version }} · 内核 {{ ansible_kernel }} · {{ ansible_machine }}
+平台: {{ ansible_virtualization_type | default('物理机') }} · CPU {{ ansible_processor_cores | default('?') }} 核
+
+## 总评: {{ sev_icon.get(worst,'❓') }} {{ sev_text.get(worst,'未知') }}
+{% for k in present -%}
+{%   set sv = vars.get('hc_section_' + k + '_severity','ok') -%}
+## {{ sev_icon.get(sv,'ℹ️') }} {{ vars.get('hc_section_' + k + '_title', k) }} ({{ sv }})
+{{ vars.get('hc_section_' + k + '_body','') }}
+{% endfor -%}
+---
+生成于 {{ ansible_date_time.iso8601 }} · 本报告由 ansible_1 巡检体系生成 · JSON 机读版见同目录 .json

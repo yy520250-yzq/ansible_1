@@ -1,0 +1,37 @@
+---
+# ============================================================
+# hc_common / report —— 报告生成(在全部专项收集完成后调用)
+# 读取各专项写入的主机事实:
+#   hc_section_<key>_body / _severity / _title
+# 产出: Markdown(人读) + JSON(机读,供二期 n8n/ollama) + 控制台摘要
+# ============================================================
+- name: "确保报告目录: {{ hc_report_dir }}"
+  ansible.builtin.file:
+    path: "{{ hc_report_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: 渲染 Markdown 报告
+  ansible.builtin.template:
+    src: report.md.j2
+    dest: "{{ hc_report_dir }}/{{ ansible_hostname | default(inventory_hostname) }}-{{ ansible_date_time.date | default('nodate') }}.md"
+    mode: "0644"
+  register: hc_report_md
+
+- name: 渲染 JSON 报告(机读)
+  ansible.builtin.template:
+    src: report.json.j2
+    dest: "{{ hc_report_dir }}/{{ ansible_hostname | default(inventory_hostname) }}-{{ ansible_date_time.date | default('nodate') }}.json"
+    mode: "0644"
+
+- name: 清理超过保留天数的旧报告
+  ansible.builtin.shell: "find {{ hc_report_dir }} -name '*.md' -o -name '*.json' | while read f; do [ -n \"$(find \"$f\" -mtime +{{ hc_report_retain_days | default(30) }} 2>/dev/null)\" ] && rm -f \"$f\"; done; true"
+  changed_when: false
+
+- name: 打印巡检摘要(控制台/Semaphore 日志可见)
+  ansible.builtin.debug:
+    msg: |
+      ============================================
+      {{ (lookup('template', 'summary.txt.j2')).strip() }}
+      ============================================
+      报告文件: {{ hc_report_md.dest }}

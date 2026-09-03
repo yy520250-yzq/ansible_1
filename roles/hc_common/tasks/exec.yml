@@ -1,0 +1,31 @@
+---
+# ============================================================
+# hc_common / exec —— 安全执行宏(唯一采集入口)
+# 用法(在任意专项 role 中):
+#   - include_role:
+#       name: hc_common
+#       tasks_from: exec
+#     vars:
+#       hc_cmd: "uptime"          # 要执行的命令(bash)
+#       hc_var: hc_os_uptime      # 结果写入的主机变量,结构 {rc,out,err}
+#       hc_timeout: 15            # 可选,默认 15s
+#       hc_become: false          # 可选,是否需要 root
+# 铁律:任何情况绝不 fail——单项采集挂了只留空结果,由判定层标 ⚠️
+# ============================================================
+- name: "[采集] {{ hc_cmd | replace('\n',' ') | truncate(100, true) }}"
+  ansible.builtin.shell: "{{ hc_cmd }}"
+  register: hc_exec_raw
+  changed_when: false
+  args:
+    executable: /bin/bash
+  timeout: "{{ hc_timeout | default(15) }}"
+  failed_when: false
+  become: "{{ hc_become | default(false) }}"
+  no_log: "{{ hc_no_log | default(false) }}"
+
+- name: "归集采集结果 -> {{ hc_var }}"
+  ansible.builtin.set_fact:
+    "{{ hc_var }}":
+      rc: "{{ hc_exec_raw.rc | default(999) }}"
+      out: "{{ hc_exec_raw.stdout | default('') }}"
+      err: "{{ hc_exec_raw.stderr | default('') }}"
