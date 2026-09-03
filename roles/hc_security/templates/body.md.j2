@@ -1,0 +1,140 @@
+{# ============================================================
+   hc_security 判定模板:按 healthcheck.yml 阈值判级,输出段正文
+   rank: 0 ok / 1 warn / 2 crit(末尾映射并写 <!--SEV:xx-->)
+   ============================================================ -#}
+{% set th = hc_thresholds | default({}) -%}
+{% set S = {'ok':'✅','warn':'⚠️','crit':'❌','info':'ℹ️'} -%}
+{% set R = {'0':'ok','1':'warn','2':'crit'} -%}
+{% set st = namespace(rk=0) -%}
+{% set rootok = hc_root_ok | default(false) -%}
+
+### 1. SSH 服务加固基线
+{% set sd = hc_sec_sshd.out | default({}) -%}
+{% if sd is mapping and sd -%}
+{%   if sd.get('permitemptypasswords','no') | lower == 'yes' -%}{% set st.rk = 2 -%}
+{%   endif -%}
+{%   if sd.get('passwordauthentication','no') | lower == 'yes' -%}{% set st.rk = [st.rk, 1] | max -%}
+{%   endif -%}
+{%   if sd.get('permitrootlogin','') | lower == 'yes' and sd.get('passwordauthentication','no') | lower == 'yes' -%}{% set st.rk = [st.rk, 1] | max -%}
+{%   endif -%}
+{%   set maxt = sd.get('maxauthtries', '6') | int -%}
+{%   if maxt > 6 -%}{% set st.rk = [st.rk, 1] | max -%}
+{%   endif -%}
+  PermitRootLogin: {{ sd.get('permitrootlogin','(未显式配置)') }}
+{%   if sd.get('permitrootlogin','') | lower == 'yes' -%} ⚠️ 允许 root 密码登录,建议 prohibit-password
+{%   endif -%}
+  PasswordAuthentication: {{ sd.get('passwordauthentication','(未配置)') }}
+{%   if sd.get('passwordauthentication','') | lower == 'yes' -%} ⚠️ 建议关闭密码、改用密钥
+{%   endif -%}
+  PubkeyAuthentication: {{ sd.get('pubkeyauthentication','(未配置)') }} · MaxAuthTries: {{ maxt }}
+{%   if sd.get('permitemptypasswords','') | lower == 'yes' -%}
+  ❌ 允许空密码登录!必须关闭
+{%   endif -%}
+{%   if sd.get('allowusers') -%}
+  AllowUsers 白名单: {{ sd.get('allowusers') }}
+{%   endif -%}
+{% else -%}
+  ℹ️ 未读到有效 sshd 配置(本机未装 openssh-server,或配置需 root 权限)
+{% endif -%}
+
+### 2. 暴露面与危险端口
+{% set pr = hc_sec_ports.out | default({}) -%}
+{% if pr is mapping and pr.get('listening') is not none -%}
+  TCP 共监听 {{ pr.listening }} 个端口
+{%   set fw = (hc_sec_fw.out | default('inactive-or-unknown')).strip() -%}
+{%   set bad = [] -%}
+{%   for x in pr.rows -%}
+{%     if x.wild and x.danger -%}{% set _ = bad.append(x.port ~ '@' ~ x.addr) -%}{% endif -%}
+{%   endfor -%}
+{%   if bad -%}
+{%     set fw_on = fw.startswith('active') -%}
+{%     if fw_on -%}{% set st.rk = [st.rk, 1] | max -%}
+{%     else -%}{% set st.rk = 2 -%}{% endif -%}
+  {{ '⚠️' if fw_on else '❌' }} 危险端口暴露到 0.0.0.0: {{ bad | unique | join(', ') }}
+{%     if not fw_on -%}
+    · 且未检测到启用中的防火墙 —— 强烈建议收敛或用安全组/防火墙隔离
+{%     endif -%}
+{%   else -%}
+  ✅ 未发现数据库/Redis 等敏感端口对外监听
+{%   endif -%}
+{% else -%}
+  ℹ️ 端口信息不可用
+{% endif -%}
+
+### 3. 防火墙
+{% set fw = (hc_sec_fw.out | default('inactive-or-unknown')).strip() -%}
+{% if fw == 'active-ufw' -%}
+  ✅ ufw 已启用
+{% elif fw == 'active-firewalld' -%}
+  ✅ firewalld 已启用
+{% else -%}
+  ℹ️ 未检测到启用中的 ufw/firewalld(若靠云安全组/iptables 请忽略)
+{% endif -%}
+
+### 4. 口令策略与账号
+{% set ld = hc_sec_logindefs.out | default({}) -%}
+{% if ld is mapping -%}
+{%   if ld.get('PASS_MAX_DAYS') is not none -%}
+{%     if ld.get('PASS_MAX_DAYS') | int > 90 -%}{% set st.rk = [st.rk, 1] | max -%}
+{%     endif -%}
+  PASS_MAX_DAYS = {{ ld.get('PASS_MAX_DAYS') }} 天{% if ld.get('PASS_MAX_DAYS') | int > 90 %} ⚠️ 建议 ≤90{% endif %} · PASS_MIN_DAYS = {{ ld.get('PASS_MIN_DAYS','-') }} · PASS_WARN_AGE = {{ ld.get('PASS_WARN_AGE','-') }}
+{%   else -%}
+  ℹ️ /etc/login.defs 未设 PASS_MAX_DAYS(口令将永不过期,建议配置)
+{%   endif -%}
+{% else -%}
+  ℹ️ 口令策略不可用
+{% endif -%}
+{% set sm = hc_sec_sudomem.out | default('') -%}
+{% if sm -%}
+  sudo 组成员: {{ sm.splitlines() | select('search', 'sudo_members=') | first | default('') | replace('sudo_members=', '') | trim or '(空)' }} · wheel 组成员: {{ sm.splitlines() | select('search', 'wheel_members=') | first | default('') | replace('wheel_members=', '') | trim or '(空)' }}
+{% endif -%}
+{% if rootok and hc_sec_empty is defined -%}
+{%   set ep = hc_sec_empty.out | default({'empty': []}) -%}
+{%   if ep.empty -%}
+{%     set st.rk = 2 -%}
+  ❌ 存在空密码账号: {{ ep.empty | join(', ') }}
+{%   else -%}
+  ✅ 无空密码账号
+{%   endif -%}
+{% elif not rootok -%}
+  ℹ️ 空密码账号检查需 root,本次跳过
+{% endif -%}
+
+### 5. 特权与可疑资产(需 root 更完整)
+{% if rootok and hc_sec_suid is defined -%}
+{%   set su = hc_sec_suid.out | default({'count': 0, 'sample': []}) -%}
+  SUID 特权文件: {{ su.count }} 个{% if su.sample %} (示例: {{ su.sample[:4] | join(', ') }} ...){% endif %}
+{% else -%}
+  ℹ️ SUID 检查需 root,本次跳过
+{% endif -%}
+{% if rootok and hc_sec_cron is defined -%}
+{%   set cr = hc_sec_cron.out | default({'files': []}) -%}
+  计划任务文件: {{ cr.files | length }} 个
+{%   if cr.files -%}
+{%     for f in cr.files[:8] -%}
+    · {{ f }}
+{%     endfor -%}
+{%   endif -%}
+{% else -%}
+  ℹ️ 计划任务审计需 root,本次跳过
+{% endif -%}
+
+### 6. 补丁与防护服务
+{% set hd = hc_sec_hardening.out | default('') -%}
+{% if hd -%}
+{%   set ha = namespace(ua='?', fb='?', ad='?') -%}
+{%   for tok in hd.split() -%}
+{%     set kv = tok.split('=', 1) -%}
+{%     if kv | length == 2 and kv[0] == 'unattended' -%}{% set ha.ua = kv[1] -%}{% endif -%}
+{%     if kv | length == 2 and kv[0] == 'fail2ban' -%}{% set ha.fb = kv[1] -%}{% endif -%}
+{%     if kv | length == 2 and kv[0] == 'auditd' -%}{% set ha.ad = kv[1] -%}{% endif -%}
+{%   endfor -%}
+{%   if ha.ua not in ('1', 'true', 'True') -%}{% set st.rk = [st.rk, 1] | max -%}{% endif -%}
+{%   if ha.fb == 'inactive' and sd.get('passwordauthentication','') | lower == 'yes' -%}{% set st.rk = [st.rk, 1] | max -%}{% endif -%}
+  自动安全更新(unattended-upgrades): {{ '✅ 已启用' if ha.ua in ('1','true','True') else '⚠️ 未启用' }}
+  fail2ban(爆破防护): {{ '✅ active' if ha.fb == 'active' else 'ℹ️ ' ~ ha.fb }}
+  auditd(审计): {{ '✅ active' if ha.ad == 'active' else 'ℹ️ ' ~ ha.ad }}
+{% else -%}
+  ℹ️ 防护服务状态不可用
+{% endif -%}
+<!--SEV:{{ R[st.rk|string] }}-->

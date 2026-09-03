@@ -1,0 +1,17 @@
+---
+# ============================================================
+# hc_security 入口:提权探测(未探测过时) → 采集 → 判定/渲染
+# 输出: hc_section_security_body / _title / _severity
+# 原则:能免 root 就免 root;需 root 项在无权限时优雅降级为 ℹ️
+# ============================================================
+- name: 提权能力探测(如尚未执行)
+  ansible.builtin.include_role:
+    name: hc_common
+    tasks_from: rootprobe
+  when: hc_root_ok is not defined
+
+- name: 安全专项 - 采集
+  ansible.builtin.include_tasks: collect.yml
+
+- name: 安全专项 - 判定与渲染
+  ansible.builtin.include_tasks: render.yml

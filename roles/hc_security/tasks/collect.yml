@@ -1,0 +1,185 @@
+---
+# ============================================================
+# hc_security / collect —— 安全专项采集
+# 需 root 项(auth 日志/空密码/SUID/计划任务)在无权限时自动跳过
+# ============================================================
+
+# 1. sshd 配置审计(解析配置 + include 目录)
+- name: 采集 sshd 配置
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_timeout: 20
+    hc_var: hc_sec_sshd
+    hc_cmd: |
+      python3 - <<'PY'
+      import os, re, glob, json
+      want = {"permitrootlogin","passwordauthentication","pubkeyauthentication",
+              "permitemptypasswords","maxauthtries","x11forwarding","usepam","allowusers"}
+      res = {}
+      def parse_file(path, depth=0):
+          if depth > 4 or not os.path.exists(path): return
+          try: lines = open(path, errors="ignore").read().splitlines()
+          except Exception: return
+          for raw in lines:
+              line = raw.strip()
+              if not line or line.startswith("#"): continue
+              parts = line.split(None, 1)
+              key = parts[0].lower()
+              val = parts[1].strip() if len(parts) > 1 else ""
+              if key == "include":
+                  gp = val if val.startswith("/") else os.path.join(os.path.dirname(path), val)
+                  for f in sorted(glob.glob(gp)):
+                      parse_file(f, depth + 1)
+              elif key in want and key not in res:
+                  res[key] = val
+      parse_file("/etc/ssh/sshd_config")
+      print(json.dumps(res))
+      PY
+
+# 2. 端口暴露面(危险服务是否监听 0.0.0.0)
+- name: 采集监听端口暴露面
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_timeout: 20
+    hc_var: hc_sec_ports
+    hc_cmd: |
+      python3 - <<'PY'
+      import subprocess, json
+      try:
+          out = subprocess.run("ss -H -tln", shell=True, capture_output=True, text=True).stdout
+      except Exception:
+          out = ""
+      danger = {"21","23","25","139","445","1433","3306","5432","6379","27017","9200","11211","3389","5900","5984"}
+      rows, wild = [], []
+      for l in out.splitlines():
+          p = l.split()
+          if len(p) < 5: continue
+          local = p[3]
+          if ":" not in local: continue
+          addr, port = local.rsplit(":", 1)
+          isw = addr in ("0.0.0.0", "*", "[::]", "::")
+          ds = port in danger
+          rows.append({"addr": addr, "port": port, "wild": isw, "danger": ds})
+          if isw and ds:
+              wild.append(":" + port + "@" + addr)
+      print(json.dumps({"listening": len(rows), "rows": rows, "wild_danger": sorted(set(wild))}))
+      PY
+
+# 3. 防火墙状态
+- name: 采集防火墙状态
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_timeout: 20
+    hc_var: hc_sec_fw
+    hc_cmd: |
+      if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi 'Status: active'; then echo 'active-ufw'
+      elif systemctl is-active firewalld 2>/dev/null | grep -qi active; then echo 'active-firewalld'
+      else echo 'inactive-or-unknown'; fi
+
+# 4. 口令策略(login.defs)
+- name: 采集口令策略
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_timeout: 15
+    hc_var: hc_sec_logindefs
+    hc_cmd: |
+      python3 - <<'PY'
+      import json
+      keys = {"PASS_MAX_DAYS","PASS_MIN_DAYS","PASS_WARN_AGE","LOGIN_RETRIES"}
+      res = {}
+      try:
+          for l in open("/etc/login.defs", errors="ignore"):
+              l = l.strip()
+              if not l or l.startswith("#"): continue
+              p = l.split(None, 1)
+              if len(p) == 2 and p[0] in keys: res[p[0]] = p[1]
+      except Exception: pass
+      print(json.dumps(res))
+      PY
+
+# 5. 可 sudo 用户(非 root 组内)
+- name: 采集 sudo/wheel 组成员
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_timeout: 15
+    hc_var: hc_sec_sudomem
+    hc_cmd: |
+      echo "sudo_members=$(getent group sudo 2>/dev/null | cut -d: -f4)"
+      echo "wheel_members=$(getent group wheel 2>/dev/null | cut -d: -f4)"
+
+# 6. 补丁与防护工具(unattended-upgrades / fail2ban)
+- name: 采集自动更新与防护服务
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_timeout: 20
+    hc_var: hc_sec_hardening
+    hc_cmd: |
+      if command -v dpkg >/dev/null 2>&1; then
+        echo "unattended=$(dpkg-query -W -f='${db:Status-Abbrev}' unattended-upgrades 2>/dev/null | grep -c '^ii')"
+      else
+        echo "unattended=rpm"
+      fi
+      echo "fail2ban=$(systemctl is-active fail2ban 2>/dev/null || echo inactive)"
+      echo "auditd=$(systemctl is-active auditd 2>/dev/null || echo inactive)"
+
+# 7. 空密码账号(需 root)
+- name: 采集空密码账号(需 root)
+  include_role: {name: hc_common, tasks_from: exec}
+  when: hc_root_ok | default(false)
+  vars:
+    hc_timeout: 20
+    hc_become: true
+    hc_var: hc_sec_empty
+    hc_cmd: |
+      python3 - <<'PY'
+      import json
+      empty = []
+      try:
+          for l in open("/etc/shadow", errors="ignore"):
+              p = l.split(":")
+              if len(p) >= 2 and p[1] == "":
+                  empty.append(p[0])
+      except Exception as e:
+          print(json.dumps({"error": str(e)})); raise SystemExit
+      print(json.dumps({"empty": empty}))
+      PY
+
+# 8. SUID 特权文件(需 root)
+- name: 采集 SUID 文件(需 root)
+  include_role: {name: hc_common, tasks_from: exec}
+  when: hc_root_ok | default(false)
+  vars:
+    hc_timeout: 40
+    hc_become: true
+    hc_var: hc_sec_suid
+    hc_cmd: |
+      python3 - <<'PY'
+      import subprocess, json
+      r = subprocess.run("find / -xdev -type f -perm -4000 2>/dev/null",
+                         shell=True, capture_output=True, text=True)
+      paths = [l for l in r.stdout.splitlines() if l.strip()]
+      print(json.dumps({"count": len(paths), "sample": paths[:15]}))
+      PY
+
+# 9. 计划任务清单(需 root)
+- name: 采集计划任务(需 root)
+  include_role: {name: hc_common, tasks_from: exec}
+  when: hc_root_ok | default(false)
+  vars:
+    hc_timeout: 20
+    hc_become: true
+    hc_var: hc_sec_cron
+    hc_cmd: |
+      python3 - <<'PY'
+      import os, json
+      files = []
+      for base in ("/etc/cron.d", "/etc/cron.hourly", "/etc/cron.daily",
+                   "/etc/cron.weekly", "/etc/cron.monthly", "/var/spool/cron/crontabs"):
+          if os.path.isdir(base):
+              try: names = os.listdir(base)
+              except Exception: names = []
+              for n in names:
+                  if not n.startswith("."):
+                      files.append(os.path.join(base, n))
+      print(json.dumps({"files": sorted(files)}))
+      PY

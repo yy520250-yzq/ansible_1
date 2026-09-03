@@ -40,9 +40,9 @@ hc_thresholds:
 
 # ---------- 专项开关(未来各专项共用) ----------
 hc_profiles:
-  os: true          # 系统通用(本阶段已实现)
-  security: false   # 安全专项(下一阶段)
-  network: false    # 网络专项
+  os: true          # 系统通用(已实现)
+  security: true    # 安全专项(已实现)
+  network: false    # 网络专项(下一阶段)
   service: false    # 服务专项
   memory: false     # 内存专项
   disk: false       # 磁盘专项

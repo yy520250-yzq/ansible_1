@@ -20,6 +20,11 @@
         name: hc_os
       when: hc_profiles.os | default(true)
 
+    - name: 安全专项巡检
+      ansible.builtin.include_role:
+        name: hc_security
+      when: hc_profiles.security | default(false)
+
     - name: 生成 Markdown / JSON 报告
       ansible.builtin.include_role:
         name: hc_common

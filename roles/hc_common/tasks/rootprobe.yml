@@ -1,0 +1,22 @@
+---
+# ============================================================
+# hc_common / rootprobe —— 探测提权能力(各专项共用)
+# 结果写入 hc_root_ok(bool),供需要 root 的采集做开关
+# ============================================================
+- name: 探测当前用户 euid
+  ansible.builtin.command: id -u
+  register: hc_euid
+  changed_when: false
+  failed_when: false
+
+- name: 探测是否可免密 sudo(未 root 时)
+  ansible.builtin.command: sudo -n true
+  register: hc_sudo_test
+  changed_when: false
+  failed_when: false
+  when: hc_euid.stdout | default('1') | int != 0
+  ignore_errors: true
+
+- name: 记录提权能力
+  ansible.builtin.set_fact:
+    hc_root_ok: "{{ (hc_euid.stdout | default('1') | int == 0) or (hc_sudo_test.rc is defined and hc_sudo_test.rc == 0) }}"

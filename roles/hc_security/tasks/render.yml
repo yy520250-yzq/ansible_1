@@ -1,0 +1,16 @@
+---
+# hc_security / render —— 判定层(镜像 hc_os 模式)
+- name: 渲染安全段正文
+  ansible.builtin.set_fact:
+    hc_section_security_body: "{{ lookup('template', 'body.md.j2') }}"
+    hc_section_security_title: "安全专项巡检"
+
+- name: 提取段级严重度
+  ansible.builtin.set_fact:
+    hc_section_security_severity: >-
+      {{ 'crit' if '<!--SEV:crit-->' in hc_section_security_body
+         else ('warn' if '<!--SEV:warn-->' in hc_section_security_body else 'ok') }}
+
+- name: 剥离 SEV 标记
+  ansible.builtin.set_fact:
+    hc_section_security_body: "{{ hc_section_security_body | regex_replace('<!--SEV:[a-z]+-->', '') }}"
