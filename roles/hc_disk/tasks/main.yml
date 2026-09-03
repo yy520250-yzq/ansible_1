@@ -1,0 +1,13 @@
+---
+# hc_disk 入口
+- name: 提权能力探测(如尚未执行)
+  ansible.builtin.include_role:
+    name: hc_common
+    tasks_from: rootprobe
+  when: hc_root_ok is not defined
+
+- name: 磁盘专项 - 采集
+  ansible.builtin.include_tasks: collect.yml
+
+- name: 磁盘专项 - 判定与渲染
+  ansible.builtin.include_tasks: render.yml

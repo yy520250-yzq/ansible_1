@@ -1,0 +1,16 @@
+---
+# hc_memory / render
+- name: 渲染内存段正文
+  ansible.builtin.set_fact:
+    hc_section_memory_body: "{{ lookup('template', 'body.md.j2') }}"
+    hc_section_memory_title: "内存专项巡检"
+
+- name: 提取段级严重度
+  ansible.builtin.set_fact:
+    hc_section_memory_severity: >-
+      {{ 'crit' if '<!--SEV:crit-->' in hc_section_memory_body
+         else ('warn' if '<!--SEV:warn-->' in hc_section_memory_body else 'ok') }}
+
+- name: 剥离 SEV 标记
+  ansible.builtin.set_fact:
+    hc_section_memory_body: "{{ hc_section_memory_body | regex_replace('<!--SEV:[a-z]+-->', '') }}"

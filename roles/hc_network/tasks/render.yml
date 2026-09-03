@@ -1,0 +1,16 @@
+---
+# hc_network / render
+- name: 渲染网络段正文
+  ansible.builtin.set_fact:
+    hc_section_network_body: "{{ lookup('template', 'body.md.j2') }}"
+    hc_section_network_title: "网络专项巡检"
+
+- name: 提取段级严重度
+  ansible.builtin.set_fact:
+    hc_section_network_severity: >-
+      {{ 'crit' if '<!--SEV:crit-->' in hc_section_network_body
+         else ('warn' if '<!--SEV:warn-->' in hc_section_network_body else 'ok') }}
+
+- name: 剥离 SEV 标记
+  ansible.builtin.set_fact:
+    hc_section_network_body: "{{ hc_section_network_body | regex_replace('<!--SEV:[a-z]+-->', '') }}"

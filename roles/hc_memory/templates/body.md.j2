@@ -1,0 +1,61 @@
+{# hc_memory 判定模板 -#}
+{% set th = hc_thresholds | default({}) -%}
+{% set S = {'ok':'✅','warn':'⚠️','crit':'❌','info':'ℹ️'} -%}
+{% set R = {'0':'ok','1':'warn','2':'crit'} -%}
+{% set st = namespace(rk=0) -%}
+
+### 1. 内存构成与真实可用
+{% set mi = hc_mem_info.out | default({}) -%}
+{% if mi is mapping and mi.get('MemTotal', 0) | int > 0 -%}
+{%   set MT = mi.MemTotal | int -%}
+{%   set MA = mi.MemAvailable | int -%}
+{%   set cache = (mi.Buffers | default(0) | int) + (mi.Cached | default(0) | int) + (mi.SReclaimable | default(0) | int) -%}
+{%   set used = 100 - (MA * 100.0 / MT) -%}
+{%   if used >= th.mem_used_crit | default(90) -%}{% set st.rk = 2 -%}
+{%   elif used >= th.mem_used_warn | default(80) -%}{% set st.rk = [st.rk, 1] | max -%}
+{%   endif -%}
+  总量 {{ (MT/1024/1024)|round(1) }}GB · 真实可用 {{ (MA/1024/1024)|round(1) }}GB ({{ '%.1f'|format(used) }}% 已用)
+  page cache+buffer+slab 可回收: {{ (cache/1024/1024)|round(1) }}GB · slab 可回收 {{ (mi.SReclaimable|default(0)|int/1024)|round|int }}MB / 不可回收 {{ (mi.SUnreclaim|default(0)|int/1024)|round|int }}MB
+{%   if mi.SwapTotal|default(0)|int > 0 -%}
+{%     set sw = (mi.SwapTotal|int - mi.SwapFree|int) * 100.0 / mi.SwapTotal|int -%}
+{%     if sw >= th.swap_used_crit|default(80) -%}{% set st.rk = 2 -%}
+{%     elif sw >= th.swap_used_warn|default(40) -%}{% set st.rk = [st.rk,1]|max -%}
+{%     endif -%}
+  Swap: {{ (mi.SwapTotal|int/1024/1024)|round(1) }}GB · 已用 {{ '%.1f'|format(sw) }}%
+{%   endif -%}
+{% else -%}
+  ℹ️ 内存明细不可用
+{% endif -%}
+
+### 2. 内存压力(PSI)
+{% set psi = hc_mem_psi.out | default({}) -%}
+{% if psi is mapping and not psi.get('unavailable') -%}
+{%   if psi.get('avg10', 0) > 10 -%}{% set st.rk = [st.rk, 1] | max -%}{% endif -%}
+  PSI some avg10={{ '%.1f'|format(psi.avg10) }}% · avg60={{ '%.1f'|format(psi.get('avg60',0)) }}%{{ ' ⚠️ 存在内存资源竞争' if psi.avg10 > 10 }}
+{% elif psi is mapping -%}
+  ℹ️ PSI 不可用(内核未开启)
+{% endif -%}
+
+### 3. 内核参数
+{% set sc = hc_mem_sysctl.out | default({}) -%}
+{% if sc is mapping and sc.get('overcommit') is not none -%}
+{%   if sc.overcommit == '2' -%}{% set st.rk = [st.rk, 1] | max -%}{% endif -%}
+  vm.overcommit_memory={{ sc.overcommit }}{{ ' ⚠️ =2 禁止超卖,可能引发进程申请内存失败' if sc.overcommit == '2' }} · vm.swappiness={{ sc.swappiness }} · min_free_kbytes={{ sc.min_free_kbytes }}
+{% else -%}
+  ℹ️ sysctl 不可用
+{% endif -%}
+
+### 4. cgroup/容器内存限制
+{% set cg = hc_mem_cgroup.out | default({}) -%}
+{% if cg is mapping and cg.get('available') -%}
+{%   if cg.max_b -%}
+{%     set pct = cg.current_b * 100.0 / cg.max_b -%}
+{%     if pct >= 90 -%}{% set st.rk = 2 -%}{% elif pct >= 80 -%}{% set st.rk = [st.rk,1]|max -%}{% endif -%}
+  cgroup 限制 {{ (cg.max_b/1024/1024/1024)|round(1) }}GB · 当前 {{ (cg.current_b/1024/1024)|round(0)|int }}MB ({{ '%.1f'|format(pct) }}%)
+{%   else -%}
+  运行于无上限 cgroup(宿主机式)
+{%   endif -%}
+{% else -%}
+  ℹ️ cgroup 统计不可用
+{% endif -%}
+<!--SEV:{{ R[st.rk|string] }}-->

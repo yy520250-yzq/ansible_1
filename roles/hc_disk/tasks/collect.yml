@@ -1,0 +1,133 @@
+---
+# ============================================================
+# hc_disk / collect —— 磁盘专项
+# ============================================================
+# 1. 容量 + inode 逐挂载点
+- name: 采集容量与 inode
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_timeout: 30
+    hc_json: true
+    hc_var: hc_disk_df
+    hc_cmd: |
+      python3 - <<'PY'
+      import subprocess, json
+      real = {"ext2","ext3","ext4","xfs","btrfs","zfs","vfat","ntfs","fuseblk"}
+      def sh(c): return subprocess.run(c, shell=True, capture_output=True, text=True).stdout.splitlines()
+      ino = {}
+      for l in sh("df -iP 2>/dev/null")[1:]:
+          p = l.split()
+          if len(p) >= 6: ino[" ".join(p[5:])] = p[4].rstrip("%")
+      out = []
+      for l in sh("df -PT 2>/dev/null")[1:]:
+          p = l.split()
+          if len(p) < 7 or p[1] not in real: continue
+          mount = " ".join(p[6:])
+          try:
+              out.append({"fs": p[0], "type": p[1], "mount": mount,
+                          "cap_pct": int(p[5].rstrip("%")),
+                          "inode_pct": int(ino.get(mount, "-1"))})
+          except ValueError: pass
+      out.sort(key=lambda x: x["cap_pct"], reverse=True)
+      print(json.dumps(out))
+      PY
+
+# 2. 大目录 Top(按根扫描,带超时防挂)
+- name: 采集大目录 Top
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_timeout: 60
+    hc_json: true
+    hc_var: hc_disk_du
+    hc_cmd: |
+      python3 - <<'PY'
+      import subprocess, json, os
+      roots = ["/var", "/home", "/opt", "/srv", "/usr/local", "/root", "/data"]
+      res = []
+      for root in roots:
+          if not os.path.isdir(root): continue
+          try:
+              r = subprocess.run(f"timeout 15 du -x --max-depth=1 -m {root} 2>/dev/null | sort -rn | head -4",
+                                 shell=True, capture_output=True, text=True, timeout=20)
+              big = []
+              for l in r.stdout.splitlines():
+                  p = l.split(None, 1)
+                  if len(p) == 2 and p[0].isdigit() and int(p[0]) >= 500:
+                      big.append({"mb": int(p[0]), "path": p[1]})
+              if big: res.append({"base": root, "big": big})
+          except Exception: pass
+      print(json.dumps(res))
+      PY
+
+# 3. 大文件 Top(>500MB, 限常见数据目录)
+- name: 采集大文件 Top
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_timeout: 70
+    hc_json: true
+    hc_var: hc_disk_bigfile
+    hc_cmd: |
+      python3 - <<'PY'
+      import subprocess, json
+      try:
+          r = subprocess.run(
+              "timeout 30 find /var /home /opt /srv /usr/local -xdev -type f -size +500M -printf '%s %p\\n' 2>/dev/null | sort -rn | head -8",
+              shell=True, capture_output=True, text=True, timeout=35)
+          files = []
+          for l in r.stdout.splitlines():
+              p = l.split(None, 1)
+              if len(p) == 2: files.append({"gb": round(int(p[0])/1024/1024/1024, 2), "path": p[1]})
+          print(json.dumps(files))
+      except Exception:
+          print(json.dumps([]))
+      PY
+
+# 4. /var/log 体积与超大日志
+- name: 采集日志膨胀
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_timeout: 30
+    hc_json: true
+    hc_var: hc_disk_log
+    hc_cmd: |
+      python3 - <<'PY'
+      import subprocess, json
+      res = {"log_total_mb": None, "big": []}
+      try:
+          r = subprocess.run("du -sm /var/log 2>/dev/null", shell=True, capture_output=True, text=True, timeout=15)
+          if r.stdout.strip(): res["log_total_mb"] = int(r.stdout.split()[0])
+          r2 = subprocess.run("find /var/log -type f -size +50M -printf '%s %p\\n' 2>/dev/null | sort -rn | head -6",
+                              shell=True, capture_output=True, text=True, timeout=15)
+          for l in r2.stdout.splitlines():
+              p = l.split(None, 1)
+              if len(p) == 2: res["big"].append({"mb": int(p[0])//1024//1024, "path": p[1]})
+      except Exception: pass
+      print(json.dumps(res))
+      PY
+
+# 5. 块设备与只读挂载
+- name: 采集块设备与只读挂载
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_timeout: 20
+    hc_json: true
+    hc_var: hc_disk_dev
+    hc_cmd: |
+      python3 - <<'PY'
+      import os, subprocess, json
+      devs, ro = [], []
+      try:
+          for name in sorted(os.listdir("/sys/block")):
+              if name.startswith(("loop", "ram", "zram", "sr")): continue
+              devs.append({"name": name, "size_mb": int(open("/sys/block/" + name + "/size").read()) * 512 // 1024 // 1024})
+      except Exception: pass
+      try:
+          r = subprocess.run("findmnt -rn -o TARGET,RO,SOURCE 2>/dev/null", shell=True,
+                             capture_output=True, text=True, timeout=10)
+          for l in r.stdout.splitlines():
+              p = l.split()
+              if len(p) == 3 and p[1] == "ro" and p[0] != "/proc":
+                  ro.append(p[0])
+      except Exception: pass
+      print(json.dumps({"devices": devs, "ro_mounts": ro}))
+      PY

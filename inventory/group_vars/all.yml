@@ -44,10 +44,10 @@ hc_thresholds:
 hc_profiles:
   os: true          # 系统通用(已实现)
   security: true    # 安全专项(已实现)
-  network: false    # 网络专项(下一阶段)
+  network: true     # 网络专项(已实现)
   service: true     # 服务专项(已实现)
-  memory: false     # 内存专项
-  disk: false       # 磁盘专项
+  memory: true     # 内存专项(已实现)
+  disk: true       # 磁盘专项(已实现)
   k8s: false        # k8s 专项
   cloud: false      # 云专项
 

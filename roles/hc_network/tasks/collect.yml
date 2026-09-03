@@ -1,0 +1,122 @@
+---
+# ============================================================
+# hc_network / collect —— 网络专项
+# ============================================================
+# 1. 默认网关/公网 ping 连通 + DNS 解析耗时
+- name: 采集网关与外部连通性
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_timeout: 40
+    hc_var: hc_net_ping
+    hc_cmd: |
+      GW=$(ip route 2>/dev/null | awk '/^default/{print $3; exit}')
+      echo "gateway=$GW"
+      [ -n "$GW" ] && (ping -c1 -W2 -n "$GW" >/dev/null 2>&1 && echo "gw_ping=ok" || echo "gw_ping=fail")
+      for h in 223.5.5.5 8.8.8.8; do
+        ping -c1 -W2 -n $h >/dev/null 2>&1 && echo "ext:$h=ok" || echo "ext:$h=fail"
+      done
+
+- name: 采集 DNS 解析质量
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_timeout: 25
+    hc_json: true
+    hc_var: hc_net_dns
+    hc_cmd: |
+      python3 - <<'PY'
+      import socket, time, json
+      res = {}
+      servers = []
+      try:
+          for l in open("/etc/resolv.conf", errors="ignore"):
+              p = l.split()
+              if len(p) >= 2 and p[0] == "nameserver":
+                  servers.append(p[1])
+      except Exception: pass
+      res["nameservers"] = servers
+      try:
+          t0 = time.time()
+          socket.getaddrinfo("example.com", 443)
+          res["resolve_ms"] = round((time.time() - t0) * 1000)
+      except Exception:
+          res["resolve_ms"] = None
+      print(json.dumps(res))
+      PY
+
+# 2. 网卡健康(速率/状态/MTU, 排除虚拟网卡)
+- name: 采集网卡健康
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_timeout: 20
+    hc_json: true
+    hc_var: hc_net_iface
+    hc_cmd: |
+      python3 - <<'PY'
+      import os, json
+      rows = []
+      try:
+          for name in sorted(os.listdir("/sys/class/net")):
+              if name in ("lo",) or name.startswith(("veth", "docker", "br-", "virbr")):
+                  continue
+              base = "/sys/class/net/" + name
+              def rd(f):
+                  try: return open(base + "/" + f).read().strip()
+                  except Exception: return None
+              rows.append({"name": name, "operstate": rd("operstate"),
+                           "speed_mbps": rd("speed"), "mtu": rd("mtu"),
+                           "carrier": rd("carrier")})
+      except Exception as e:
+          rows.append({"error": str(e)})
+      print(json.dumps(rows))
+      PY
+
+# 3. TCP 状态分布 / 重传率(/proc/net/snmp)
+- name: 采集 TCP 状态与重传
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_timeout: 25
+    hc_json: true
+    hc_var: hc_net_tcp
+    hc_cmd: |
+      python3 - <<'PY'
+      import re, json, subprocess
+      out = subprocess.run("ss -H -tan 2>/dev/null", shell=True, capture_output=True, text=True).stdout
+      states = {}
+      for l in out.splitlines():
+          st = l.split()[0] if l.split() else ""
+          states[st] = states.get(st, 0) + 1
+      retrans = {"ratio": None, "retrans": 0, "out": 0}
+      try:
+          lines = open("/proc/net/snmp", errors="ignore").read().splitlines()
+          for i, line in enumerate(lines):
+              if line.startswith("Tcp:") and i + 1 < len(lines):
+                  keys = line.split()
+                  vals = lines[i + 1].split()
+                  d = dict(zip(keys[1:], vals[1:]))
+                  ro = int(d.get("RetransSegs", 0)); oo = int(d.get("OutSegs", 0))
+                  retrans = {"retrans": ro, "out": oo,
+                             "ratio": round(ro * 100.0 / oo, 2) if oo else None}
+      except Exception: pass
+      print(json.dumps({"states": states, "retrans": retrans}))
+      PY
+
+# 4. 已建立连接 Top 对端
+- name: 采集连接 Top 对端
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_timeout: 20
+    hc_json: true
+    hc_var: hc_net_remote
+    hc_cmd: |
+      python3 - <<'PY'
+      import subprocess, json, collections
+      out = subprocess.run("ss -H -tn state established 2>/dev/null", shell=True,
+                           capture_output=True, text=True).stdout
+      c = collections.Counter()
+      for l in out.splitlines():
+          p = l.split()
+          if len(p) >= 5:
+              host = p[4].rsplit(":", 1)[0]
+              if host != "*": c[host] += 1
+      print(json.dumps(c.most_common(6)))
+      PY

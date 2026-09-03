@@ -1,0 +1,16 @@
+---
+# hc_disk / render
+- name: 渲染磁盘段正文
+  ansible.builtin.set_fact:
+    hc_section_disk_body: "{{ lookup('template', 'body.md.j2') }}"
+    hc_section_disk_title: "磁盘专项巡检"
+
+- name: 提取段级严重度
+  ansible.builtin.set_fact:
+    hc_section_disk_severity: >-
+      {{ 'crit' if '<!--SEV:crit-->' in hc_section_disk_body
+         else ('warn' if '<!--SEV:warn-->' in hc_section_disk_body else 'ok') }}
+
+- name: 剥离 SEV 标记
+  ansible.builtin.set_fact:
+    hc_section_disk_body: "{{ hc_section_disk_body | regex_replace('<!--SEV:[a-z]+-->', '') }}"

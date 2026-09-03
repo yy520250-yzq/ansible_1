@@ -1,0 +1,94 @@
+---
+# ============================================================
+# hc_memory / collect —— 内存专项
+# ============================================================
+# 1. 完整 meminfo(含 cache/buffer/slab)
+- name: 采集 meminfo 明细
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_timeout: 20
+    hc_json: true
+    hc_var: hc_mem_info
+    hc_cmd: |
+      python3 - <<'PY'
+      import json
+      want = ("MemTotal","MemFree","MemAvailable","Buffers","Cached","SwapTotal",
+              "SwapFree","SReclaimable","SUnreclaim","Shmem","Slab","Dirty")
+      d = {}
+      try:
+          for line in open("/proc/meminfo"):
+              p = line.split()
+              if p and p[0].rstrip(":") in want:
+                  d[p[0].rstrip(":")] = int(p[1])
+      except Exception as e:
+          d = {"error": str(e)}
+      print(json.dumps(d))
+      PY
+
+# 2. PSI 内存压力(内核4.20+,cgroup2)
+- name: 采集 PSI 内存压力
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_timeout: 15
+    hc_json: true
+    hc_var: hc_mem_psi
+    hc_cmd: |
+      python3 - <<'PY'
+      import json
+      d = {}
+      try:
+          for line in open("/proc/pressure/memory"):
+              if line.startswith("some"):
+                  for tok in line.split()[1:]:
+                      k, v = tok.split("=")
+                      d[k] = float(v)
+      except Exception:
+          d = {"unavailable": True}
+      print(json.dumps(d))
+      PY
+
+# 3. 内存相关内核参数
+- name: 采集内存内核参数
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_timeout: 15
+    hc_json: true
+    hc_var: hc_mem_sysctl
+    hc_cmd: |
+      python3 - <<'PY'
+      import json
+      def rd(p):
+          try: return open(p).read().strip()
+          except Exception: return None
+      print(json.dumps({
+          "overcommit": rd("/proc/sys/vm/overcommit_memory"),
+          "swappiness": rd("/proc/sys/vm/swappiness"),
+          "min_free_kbytes": rd("/proc/sys/vm/min_free_kbytes"),
+          "max_map_count": rd("/proc/sys/vm/max_map_count"),
+      }))
+      PY
+
+# 4. cgroup v2 内存限制(容器/受控环境可读时)
+- name: 采集 cgroup 内存限制
+  include_role: {name: hc_common, tasks_from: exec}
+  vars:
+    hc_timeout: 15
+    hc_json: true
+    hc_var: hc_mem_cgroup
+    hc_cmd: |
+      python3 - <<'PY'
+      import json
+      d = {"available": False}
+      base = "/sys/fs/cgroup"
+      try:
+          cur = open(base + "/memory.current").read().strip()
+          mx = open(base + "/memory.max").read().strip()
+          anon = open(base + "/memory.stat").read()
+          a = 0
+          for l in anon.splitlines():
+              if l.startswith("anon "): a = int(l.split()[1])
+          d = {"available": True, "current_b": int(cur), "max_b": (None if mx == "max" else int(mx)), "anon_b": a}
+      except Exception:
+          pass
+      print(json.dumps(d))
+      PY

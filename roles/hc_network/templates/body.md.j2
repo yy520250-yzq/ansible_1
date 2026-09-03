@@ -1,0 +1,88 @@
+{# hc_network 判定模板 -#}
+{% set th = hc_thresholds | default({}) -%}
+{% set S = {'ok':'✅','warn':'⚠️','crit':'❌','info':'ℹ️'} -%}
+{% set R = {'0':'ok','1':'warn','2':'crit'} -%}
+{% set st = namespace(rk=0) -%}
+
+### 1. 网关与外部连通
+{% set pg = hc_net_ping.out | default('') -%}
+{% if pg -%}
+{%   set ns = namespace(gw='', gwp='?', exts=[]) -%}
+{%   for l in pg.splitlines() -%}
+{%     if l.startswith('gateway=') -%}{% set ns.gw = l.split('=',1)[1] -%}
+{%     elif l.startswith('gw_ping=') -%}{% set ns.gwp = l.split('=',1)[1] -%}
+{%     elif l.startswith('ext:') -%}{% set _ = ns.exts.append(l) -%}
+{%     endif -%}
+{%   endfor -%}
+{%   if ns.gw and ns.gwp == 'ok' -%}
+  默认网关 {{ ns.gw }} 可达 ✅
+{%   elif ns.gw -%}
+{%     set st.rk = [st.rk, 1] | max -%}
+  ⚠️ 默认网关 {{ ns.gw }} ping 不通(若公网外联正常多为防火墙禁 ICMP,建议核对路由与防火墙)
+{%   else -%}
+  ℹ️ 未发现默认网关(可能容器/纯内网)
+{%   endif -%}
+{%   for e in ns.exts -%}
+{%     set parts = e.split('=') -%}
+{%     set host = parts[0].split(':')[1] -%}
+{%     set ok = (parts[1] == 'ok') -%}
+{%     if not ok -%}{% set st.rk = [st.rk, 1] | max -%}{% endif -%}
+  {{ S['ok'] if ok else S['warn'] }} 公网 {{ host }} ping {{ '可达' if ok else '失败/超时' }}
+{%   endfor -%}
+{% else -%}
+  ℹ️ 连通探测不可用
+{% endif -%}
+
+### 2. DNS 解析
+{% set dns = hc_net_dns.out | default({}) -%}
+{% if dns is mapping and dns.get('resolve_ms') is not none -%}
+{%   if dns.resolve_ms > 200 -%}{% set st.rk = [st.rk, 1] | max -%}{% endif -%}
+  nameserver: {{ dns.nameservers | join(', ') }}
+  example.com 解析耗时: {{ dns.resolve_ms }}ms{{ ' ⚠️ 偏慢' if dns.resolve_ms > 200 else ' ✅' }}
+{% elif dns is mapping and dns.resolve_ms is none -%}
+{%   set st.rk = 2 -%}
+  ❌ DNS 解析失败(example.com 无法解析)
+  nameserver: {{ dns.nameservers | join(', ') }}
+{% else -%}
+  ℹ️ DNS 数据不可用
+{% endif -%}
+
+### 3. 网卡健康(实体网卡)
+{% set ifs = hc_net_iface.out | default([]) -%}
+{% if ifs is iterable and ifs is not string -%}
+{%   if not ifs -%}
+  ✅ 无非虚拟网卡需关注
+{%   endif -%}
+{%   for i in ifs -%}
+{%     if 'error' in i -%}
+  ℹ️ 网卡数据异常: {{ i.error }}
+{%     else -%}
+{%       set down = (i.operstate == 'down') -%}
+{%       if down -%}{% set st.rk = [st.rk, 1] | max -%}{% endif -%}
+  {{ S['warn'] if down else S['info'] }} {{ i.name }}: {{ i.operstate }} · {{ i.speed_mbps ~ 'Mbps' if i.speed_mbps and i.speed_mbps != '-1' else '速率未知' }} · MTU {{ i.mtu }}
+{%     endif -%}
+{%   endfor -%}
+{% else -%}
+  ℹ️ 网卡数据不可用
+{% endif -%}
+
+### 4. TCP 状态与重传
+{% set tc = hc_net_tcp.out | default({}) -%}
+{% if tc is mapping and tc.get('states') -%}
+{%   set rt = tc.retrans.ratio -%}
+{%   if rt is not none and rt > 1.0 -%}{% set st.rk = [st.rk, 1] | max -%}{% endif -%}
+  ESTAB {{ tc.states.get('ESTAB',0) }} · LISTEN {{ tc.states.get('LISTEN',0) }} · TIME-WAIT {{ tc.states.get('TIME-WAIT',0) }} · SYN-SENT {{ tc.states.get('SYN-SENT',0) }} · CLOSE-WAIT {{ tc.states.get('CLOSE-WAIT',0) }}
+  重传率: {{ rt ~ '%' if rt is not none else 'N/A' }}{{ ' ⚠️ >1% 建议排查丢包' if rt is not none and rt > 1.0 }}
+{% else -%}
+  ℹ️ TCP 数据不可用
+{% endif -%}
+
+### 5. 连接 Top 对端
+{% set rm = hc_net_remote.out | default([]) -%}
+{% if rm is iterable and rm is not string and rm -%}
+  已建立连接 Top:
+{%   for pair in rm -%}
+    · {{ pair[0] }} ({{ pair[1] }})
+{%   endfor -%}
+{% endif -%}
+<!--SEV:{{ R[st.rk|string] }}-->

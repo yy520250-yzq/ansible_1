@@ -30,6 +30,21 @@
         name: hc_service
       when: hc_profiles.service | default(false)
 
+    - name: 网络专项巡检
+      ansible.builtin.include_role:
+        name: hc_network
+      when: hc_profiles.network | default(false)
+
+    - name: 内存专项巡检
+      ansible.builtin.include_role:
+        name: hc_memory
+      when: hc_profiles.memory | default(false)
+
+    - name: 磁盘专项巡检
+      ansible.builtin.include_role:
+        name: hc_disk
+      when: hc_profiles.disk | default(false)
+
     - name: 生成 Markdown / JSON 报告
       ansible.builtin.include_role:
         name: hc_common

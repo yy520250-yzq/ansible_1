@@ -1,0 +1,76 @@
+{# hc_disk 判定模板 -#}
+{% set th = hc_thresholds | default({}) -%}
+{% set S = {'ok':'✅','warn':'⚠️','crit':'❌','info':'ℹ️'} -%}
+{% set R = {'0':'ok','1':'warn','2':'crit'} -%}
+{% set st = namespace(rk=0) -%}
+
+### 1. 容量与 inode
+{% set df = hc_disk_df.out | default([]) -%}
+{% if df is iterable and df is not string and df -%}
+{%   set rows = [] -%}
+{%   for m in df -%}
+{%     set rk = 0 -%}
+{%     if m.cap_pct >= th.disk_cap_crit|default(90) -%}{% set rk = 2 -%}
+{%     elif m.cap_pct >= th.disk_cap_warn|default(80) -%}{% set rk = 1 -%}
+{%     endif -%}
+{%     if m.inode_pct >= 0 and m.inode_pct >= th.inode_crit|default(95) -%}{% set rk = 2 -%}
+{%     elif m.inode_pct >= 0 and m.inode_pct >= th.inode_warn|default(85) -%}{% if rk < 1 %}{% set rk = 1 %}{% endif -%}
+{%     endif -%}
+{%     set _ = rows.append(rk) -%}
+  {{ S[R[rk|string]] }} {{ m.mount }}: 容量 {{ m.cap_pct }}% · inode {{ m.inode_pct if m.inode_pct >= 0 else 'N/A' }}% ({{ m.type }})
+{%   endfor -%}
+{%   if 2 in rows -%}{% set st.rk = 2 -%}{% elif 1 in rows -%}{% set st.rk = [st.rk,1]|max -%}{% endif -%}
+{% else -%}
+  ℹ️ 磁盘数据不可用
+{% endif -%}
+
+### 2. 大目录 Top(建议关注 >500MB 的子目录)
+{% set du = hc_disk_du.out | default([]) -%}
+{% if du is iterable and du is not string and du -%}
+{%   for g in du -%}
+  {{ g.base }}:
+{%     for b in g.big -%}
+    · {{ b.mb }}MB  {{ b.path }}
+{%     endfor -%}
+{%   endfor -%}
+{% endif -%}
+
+### 3. 大文件 Top(>500MB)
+{% set bf = hc_disk_bigfile.out | default([]) -%}
+{% if bf is iterable and bf is not string -%}
+{%   if bf -%}
+{%     set st.rk = [st.rk, 1] | max -%}
+{%     for f in bf[:6] -%}
+  ⚠️ {{ f.gb }}GB  {{ f.path }}
+{%     endfor -%}
+{%   else -%}
+  ✅ 未发现 >500MB 大文件(在 /var /home /opt 等数据目录)
+{%   endif -%}
+{% endif -%}
+
+### 4. 日志膨胀
+{% set lg = hc_disk_log.out | default({}) -%}
+{% if lg is mapping and lg.get('log_total_mb') is not none -%}
+  /var/log 共 {{ lg.log_total_mb }}MB{% if lg.big %}
+{%     set st.rk = [st.rk, 1] | max -%}
+  超大日志(>50MB):
+{%     for x in lg.big -%}
+    · {{ x.mb }}MB  {{ x.path }}
+{%     endfor -%}
+{%   else -%} · 无 >50MB 单文件 ✅{% endif -%}
+{% endif -%}
+
+### 5. 块设备与只读挂载
+{% set dv = hc_disk_dev.out | default({}) -%}
+{% if dv is mapping -%}
+{%   set devs = dv.devices | default([]) -%}
+{%   if devs -%}
+  块设备: {% for d in devs %}{{ d.name }}({{ d.size_mb }}MB) {% endfor %}
+{%   endif -%}
+{%   set ro = dv.ro_mounts | default([]) -%}
+{%   if ro -%}
+{%     set st.rk = 2 -%}
+  ❌ 只读挂载点: {{ ro | join(', ') }}(可能文件系统异常,需排查)
+{%   endif -%}
+{% endif -%}
+<!--SEV:{{ R[st.rk|string] }}-->
