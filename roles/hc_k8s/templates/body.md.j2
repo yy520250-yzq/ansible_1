@@ -13,7 +13,7 @@
 {%     if not n.ready or n.pressure -%}{% set st.rk = 2 -%}{% endif -%}
   {{ S['crit'] if (not n.ready or n.pressure) else S['ok'] }} {{ n.name }} · k8s {{ n.version }} · {{ n.cpu }}核 / {{ n.memGi }}GB{% if n.taints %} · taints: {{ n.taints | join(',') }}{% endif %}{% if n.pressure %} · ❌ 压力: {{ n.pressure | join(',') }}{% endif %}
 {%   endfor %}
-{% endif -%}
+{% endif %}
 
 ### 2. 工作负载异常
 {% set pd = hc_k8s_pods.out | default({}) -%}
